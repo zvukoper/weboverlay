@@ -1,6 +1,7 @@
 # WebOverlay
 
 **Прозрачное оверлей-окно с веб-контентом | Transparent overlay window with web content**
+
 **Developed with DeepSeek assistance**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0-blue)](https://dotnet.microsoft.com/)
