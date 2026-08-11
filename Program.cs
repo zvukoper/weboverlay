@@ -262,8 +262,6 @@ namespace WebOverlay
 
                 Log("Создаём главное окно");
                 _mainForm = new OverlayForm(url, _config, _appDataDir);
-                _mainForm.Enabled = _config.Clickable;
-                Log($"Кликабельность установлена: {_config.Clickable}");
                 Log("Главное окно создано, запускаем Application.Run");
                 Application.Run(_mainForm);
                 Log("Application.Run завершён");
@@ -721,41 +719,41 @@ EscapeDesc=خروج"
                 flow.Controls.Add(btn);
             }
 
-          // Кликабельная ссылка на конфиг (или на папку, если файла нет)
-string configPath = Path.Combine(_appDataDir, "config.json");
-var linkLabel = new LinkLabel
-{
-    Text = Localization.Get("ConfigFileLabel") + " " + configPath,
-    AutoSize = true,
-    Font = new Font("Segoe UI", 8, FontStyle.Italic),
-    ForeColor = Color.Gray,
-    Margin = new Padding(0, 15, 0, 0),
-    LinkColor = Color.LightBlue,
-    ActiveLinkColor = Color.White
-};
-linkLabel.LinkClicked += (s, e) =>
-{
-    try
-    {
-        if (File.Exists(configPath))
-        {
-            Process.Start("notepad.exe", configPath);
-        }
-        else
-        {
-            string folder = Path.GetDirectoryName(configPath);
-            if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder))
-                Process.Start("explorer.exe", folder);
-            else
-                MessageBox.Show("Папка для конфига не найдена.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-    }
-    catch (Exception ex)
-    {
-        MessageBox.Show($"Не удалось открыть: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-    }
-};
-flow.Controls.Add(linkLabel);
+            // Кликабельная ссылка на конфиг (или на папку, если файла нет)
+            string configPath = Path.Combine(_appDataDir, "config.json");
+            var linkLabel = new LinkLabel
+            {
+                Text = Localization.Get("ConfigFileLabel") + " " + configPath,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                ForeColor = Color.Gray,
+                Margin = new Padding(0, 15, 0, 0),
+                LinkColor = Color.LightBlue,
+                ActiveLinkColor = Color.White
+            };
+            linkLabel.LinkClicked += (s, e) =>
+            {
+                try
+                {
+                    if (File.Exists(configPath))
+                    {
+                        Process.Start("notepad.exe", configPath);
+                    }
+                    else
+                    {
+                        string folder = Path.GetDirectoryName(configPath);
+                        if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder))
+                            Process.Start("explorer.exe", folder);
+                        else
+                            MessageBox.Show("Папка для конфига не найдена.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Не удалось открыть: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+            flow.Controls.Add(linkLabel);
 
             form.Controls.Add(flow);
             Log("Показываем диалог выбора языка (поверх всех окон)");
@@ -909,6 +907,16 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
 
         private const int HWND_TOPMOST = -1;
 
+        private void Log(string msg)
+        {
+            try
+            {
+                string logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay", "debug.log");
+                File.AppendAllText(logPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - OverlayForm: {msg}{Environment.NewLine}");
+            }
+            catch { }
+        }
+
         public OverlayForm(string url, AppConfig config, string appDataDir)
         {
             this.url = url;
@@ -922,7 +930,8 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
             InitializeForm();
             InitializeWebView();
             LoadState();
-            SetClickThrough(true);
+            SetClickThrough(!_clickable);
+            this.Enabled = _clickable;
 
             this.Shown += (s, e) =>
             {
@@ -1040,18 +1049,18 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
             if (_isHidden) return;
 
             if (CheckBinding(_config.ToggleLock, e, ToggleLock)) return;
-            if (CheckBinding(_config.MoveLeft, e, () => Location = new Point(Location.X - 5, Location.Y))) return;
-            if (CheckBinding(_config.MoveRight, e, () => Location = new Point(Location.X + 5, Location.Y))) return;
-            if (CheckBinding(_config.MoveUp, e, () => Location = new Point(Location.X, Location.Y - 5))) return;
-            if (CheckBinding(_config.MoveDown, e, () => Location = new Point(Location.X, Location.Y + 5))) return;
-            if (CheckBinding(_config.ZoomIn, e, () => { _zoomFactor = Math.Min(3.0, _zoomFactor + 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; })) return;
-            if (CheckBinding(_config.ZoomOut, e, () => { _zoomFactor = Math.Max(0.3, _zoomFactor - 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; })) return;
+            if (CheckBinding(_config.MoveLeft, e, () => { Location = new Point(Location.X - 5, Location.Y); SaveState(); })) return;
+            if (CheckBinding(_config.MoveRight, e, () => { Location = new Point(Location.X + 5, Location.Y); SaveState(); })) return;
+            if (CheckBinding(_config.MoveUp, e, () => { Location = new Point(Location.X, Location.Y - 5); SaveState(); })) return;
+            if (CheckBinding(_config.MoveDown, e, () => { Location = new Point(Location.X, Location.Y + 5); SaveState(); })) return;
+            if (CheckBinding(_config.ZoomIn, e, () => { _zoomFactor = Math.Min(3.0, _zoomFactor + 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); })) return;
+            if (CheckBinding(_config.ZoomOut, e, () => { _zoomFactor = Math.Max(0.3, _zoomFactor - 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); })) return;
             if (CheckBinding(_config.ToggleHide, e, ToggleHide)) return;
             if (CheckBinding(_config.ToggleClickable, e, ToggleClickable)) return;
-            if (CheckBinding(_config.ResizeWidthDecrease, e, () => Size = new Size(Math.Max(100, Width - _config.ResizeStep), Height))) return;
-            if (CheckBinding(_config.ResizeWidthIncrease, e, () => Size = new Size(Width + _config.ResizeStep, Height))) return;
-            if (CheckBinding(_config.ResizeHeightDecrease, e, () => Size = new Size(Width, Math.Max(100, Height - _config.ResizeStep)))) return;
-            if (CheckBinding(_config.ResizeHeightIncrease, e, () => Size = new Size(Width, Height + _config.ResizeStep))) return;
+            if (CheckBinding(_config.ResizeWidthDecrease, e, () => { Size = new Size(Math.Max(100, Width - _config.ResizeStep), Height); SaveState(); })) return;
+            if (CheckBinding(_config.ResizeWidthIncrease, e, () => { Size = new Size(Width + _config.ResizeStep, Height); SaveState(); })) return;
+            if (CheckBinding(_config.ResizeHeightDecrease, e, () => { Size = new Size(Width, Math.Max(100, Height - _config.ResizeStep)); SaveState(); })) return;
+            if (CheckBinding(_config.ResizeHeightIncrease, e, () => { Size = new Size(Width, Height + _config.ResizeStep); SaveState(); })) return;
 
             e.Handled = false;
         }
@@ -1078,8 +1087,6 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
         private void ToggleLock()
         {
             _isLocked = !_isLocked;
-            SetClickThrough(_isLocked);
-
             if (_isLocked)
             {
                 MessageBox.Show(Localization.Get("LockedMessage"),
@@ -1133,6 +1140,7 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
             this.Enabled = _clickable;
             _config.Clickable = _clickable;
             Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
+            SetClickThrough(!_clickable);
 
             if (_clickable)
             {
@@ -1153,18 +1161,22 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
             else exStyle &= ~WS_EX_TRANSPARENT;
             SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
             SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+            Log($"SetClickThrough: {enable} (WS_EX_TRANSPARENT = {(exStyle & WS_EX_TRANSPARENT) != 0})");
         }
 
         private string GetStateFilePath()
         {
             string safe = string.Join("_", url.Split(Path.GetInvalidFileNameChars()));
             if (safe.Length > 200) safe = safe[..200];
-            return Path.Combine(configDir, safe + ".txt");
+            string path = Path.Combine(configDir, safe + ".txt");
+            Log($"GetStateFilePath: {path}");
+            return path;
         }
 
         private void LoadState()
         {
             string path = GetStateFilePath();
+            Log($"LoadState: путь = {path}, файл существует = {File.Exists(path)}");
             if (!File.Exists(path))
             {
                 if (url.Contains("help.html"))
@@ -1172,11 +1184,13 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
                     Location = new Point(560, 15);
                     Size = new Size(800, 1000);
                     _zoomFactor = 1.0;
+                    Log("LoadState: установлены значения для справки");
                 }
                 else
                 {
                     var screen = Screen.PrimaryScreen.WorkingArea;
                     Location = new Point((screen.Width - Width) / 2, (screen.Height - Height) / 2);
+                    Log("LoadState: центрируем окно");
                 }
                 return;
             }
@@ -1193,9 +1207,10 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
                     Location = new Point(x, y);
                     _zoomFactor = zoom;
                     Size = new Size(w, h);
+                    Log($"LoadState: загружено {x},{y},{zoom},{w},{h}");
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"LoadState ошибка: {ex.Message}"); }
         }
 
         private void SaveState()
@@ -1203,6 +1218,7 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
             try
             {
                 string path = GetStateFilePath();
+                Log($"SaveState: сохранение в {path}");
                 File.WriteAllLines(path, new[]
                 {
                     Location.X.ToString(),
@@ -1211,8 +1227,9 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
                     Width.ToString(),
                     Height.ToString()
                 });
+                Log("SaveState: успешно сохранено");
             }
-            catch { }
+            catch (Exception ex) { Log($"SaveState ошибка: {ex.Message}"); }
         }
 
         protected override void WndProc(ref Message m)
@@ -1231,6 +1248,7 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            Log("OnFormClosing: сохранение состояния");
             _config.Clickable = _clickable;
             Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
             SaveState();
