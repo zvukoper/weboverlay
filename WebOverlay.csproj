@@ -1,13 +1,32 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>   <!-- Скрываем консольное окно -->
-    <TargetFramework>net10.0-windows</TargetFramework>  <!-- Обязательно с -windows -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
-    <UseWPF>true</UseWPF>   <!-- Нужно для WebView2 -->
+    <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
+    
+    <!-- Настройки для самодостаточной публикации -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    
+    <!-- Опционально: убрать предупреждения о нулевых ссылках (если они мешают) -->
+    <NoWarn>CS8600;CS8602;CS8625</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
   </ItemGroup>
+
+<Target Name="CopyExeToTarget" AfterTargets="Publish">
+  <Copy
+    SourceFiles="$(PublishDir)$(AssemblyName).exe"
+    DestinationFolder="F:\repo\ets2_assist\bin\Release\net10.0-windows\win-x64\publish\data\bin"
+    SkipUnchangedFiles="true"
+  />
+</Target>
+
 </Project>
