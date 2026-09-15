@@ -1,4 +1,5 @@
-﻿#nullable disable
+﻿// CORE_FIXES_V2
+#nullable disable
 
 using System;
 using System.Collections.Generic;
@@ -327,7 +328,6 @@ namespace WebOverlay
         private const int HOTKEY_PGUP = 3;
         private const int HOTKEY_PGDN = 4;
         private const int HOTKEY_TOGGLE_CLICKABLE = 5;
-        private const int HOTKEY_MOVE_MONITOR = 6;
         private const int WM_HOTKEY = 0x0312;
 
         [DllImport("user32.dll")]
@@ -342,6 +342,8 @@ namespace WebOverlay
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
 
         [STAThread]
         private static void Main(string[] args)
@@ -422,7 +424,6 @@ namespace WebOverlay
                 RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_PGUP, "Ctrl+Shift+Alt+PageUp");
                 RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_PGDN, "Ctrl+Shift+Alt+PageDown");
                 RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_TOGGLE_CLICKABLE, _config.ToggleClickable);
-                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_MOVE_MONITOR, _config.MoveMonitor);
 
                 var thread = new Thread(StartPipeServer) { IsBackground = true };
                 thread.Start();
@@ -481,9 +482,6 @@ namespace WebOverlay
                     break;
                 case HOTKEY_TOGGLE_CLICKABLE:
                     WindowManager.ToggleClickableActive();
-                    break;
-                case HOTKEY_MOVE_MONITOR:
-                    WindowManager.MoveActiveToNextMonitor();
                     break;
             }
         }
@@ -721,6 +719,12 @@ namespace WebOverlay
         private bool _manipulationMode;
         private bool _visibilityBeforeManipulation = true;
         private WindowInfoForm _infoForm;
+        private readonly System.Windows.Forms.Timer _manipulationTimer;
+        private bool _stateDirty;
+        private DateTime _lastDeferredSaveUtc = DateTime.MinValue;
+        private bool _monitorHotkeyArmed;
+        private Keys _monitorHotkeyKey = Keys.None;
+        private bool _stateApplying;
 
         public bool IsLocked => _isLocked;
         public string Url => url;
@@ -734,6 +738,10 @@ namespace WebOverlay
         private const int SWP_FRAMECHANGED = 0x0020;
         private const int WM_NCHITTEST = 0x0084;
         private const int HTTRANSPARENT = -1;
+        private const short KEY_DOWN_MASK = unchecked((short)0x8000);
+        private const int VK_CONTROL = 0x11;
+        private const int VK_SHIFT = 0x10;
+        private const int VK_MENU = 0x12;
 
         [DllImport("user32.dll")]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
@@ -766,8 +774,27 @@ namespace WebOverlay
                 UpdateManipulationInfo();
             };
 
-            LocationChanged += (s, e) => UpdateManipulationInfo();
-            SizeChanged += (s, e) => UpdateManipulationInfo();
+            LocationChanged += (s, e) =>
+            {
+                if (!_stateApplying)
+                    _stateDirty = true;
+                UpdateManipulationInfo();
+            };
+            SizeChanged += (s, e) =>
+            {
+                if (!_stateApplying)
+                    _stateDirty = true;
+                UpdateManipulationInfo();
+            };
+            KeyUp += OnKeyUp;
+
+            _manipulationTimer = new System.Windows.Forms.Timer { Interval = 15 };
+            _manipulationTimer.Tick += (_, _) =>
+            {
+                ApplyHeldMovement();
+                FlushDeferredStateSave();
+            };
+            _manipulationTimer.Start();
         }
 
         private void Log(string msg)
@@ -804,6 +831,7 @@ namespace WebOverlay
 
             Controls.Add(webView);
             webView.KeyDown += (s, e) => OnKeyDown(s, e);
+            webView.KeyUp += (s, e) => OnKeyUp(s, e);
             webView.PreviewKeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Escape || e.Control || e.Shift || e.Alt)
@@ -821,6 +849,8 @@ namespace WebOverlay
                         webView.ZoomFactor = _zoomFactor;
                         webView.Visible = _manipulationMode || _contentVisible;
                         webView.BringToFront();
+                        if (_manipulationMode)
+                            DebugShowIfAvailable();
                     }
                     catch (Exception ex)
                     {
@@ -872,6 +902,8 @@ namespace WebOverlay
             if (_manipulationMode == enabled)
             {
                 UpdateManipulationInfo();
+                if (enabled)
+                    DebugShowIfAvailable();
                 return;
             }
 
@@ -888,6 +920,7 @@ namespace WebOverlay
                 _infoForm ??= new WindowInfoForm();
                 _infoForm.Show();
                 UpdateManipulationInfo();
+                DebugShowIfAvailable();
             }
             else
             {
@@ -900,6 +933,22 @@ namespace WebOverlay
                     _infoForm = null;
                 }
                 UpdateManipulationInfo();
+            }
+        }
+
+        private void DebugShowIfAvailable()
+        {
+            try
+            {
+                if (!_manipulationMode || webView?.CoreWebView2 == null)
+                    return;
+
+                _ = webView.CoreWebView2.ExecuteScriptAsync(
+                    "try { if (typeof debugShow === 'function') debugShow(); } catch (e) {}; ");
+            }
+            catch (Exception ex)
+            {
+                Log($"debugShow error: {ex.Message}");
             }
         }
 
@@ -986,23 +1035,31 @@ namespace WebOverlay
                 return;
 
             Screen current = Screen.FromHandle(Handle);
-            int currentIndex = Array.FindIndex(screens, s => string.Equals(s.DeviceName, current.DeviceName, StringComparison.OrdinalIgnoreCase));
+            int currentIndex = Array.FindIndex(screens, s =>
+                string.Equals(s.DeviceName, current.DeviceName, StringComparison.OrdinalIgnoreCase));
             if (currentIndex < 0)
                 currentIndex = 0;
 
             Screen target = screens[(currentIndex + 1) % screens.Length];
-            Rectangle currentArea = current.WorkingArea;
-            Rectangle targetArea = target.WorkingArea;
 
-            int relativeX = Location.X - currentArea.Left;
-            int relativeY = Location.Y - currentArea.Top;
-            int maxX = Math.Max(targetArea.Left, targetArea.Right - Width);
-            int maxY = Math.Max(targetArea.Top, targetArea.Bottom - Height);
-            int newX = Math.Clamp(targetArea.Left + relativeX, targetArea.Left, maxX);
-            int newY = Math.Clamp(targetArea.Top + relativeY, targetArea.Top, maxY);
+            // Every monitor owns its own position/size/zoom state.
+            SaveStateForMonitor(current);
 
-            Location = new Point(newX, newY);
-            SaveState();
+            _stateApplying = true;
+            try
+            {
+                if (!LoadStateForMonitor(target, allowLegacy: false))
+                {
+                    ApplyDefaultState(target);
+                    SaveStateForMonitor(target);
+                }
+            }
+            finally
+            {
+                _stateApplying = false;
+                _stateDirty = false;
+            }
+
             UpdateManipulationInfo();
             Log($"MoveToNextMonitor: {current.DeviceName} -> {target.DeviceName}, location={Location.X},{Location.Y}");
         }
@@ -1056,18 +1113,147 @@ namespace WebOverlay
             if (WindowManager.ActiveWindow != this || WindowManager.IsLockMode || _isLocked)
                 return;
 
-            if (CheckBinding(_config.MoveLeft, e, () => { Location = new Point(Location.X - 5, Location.Y); SaveState(); })) return;
-            if (CheckBinding(_config.MoveRight, e, () => { Location = new Point(Location.X + 5, Location.Y); SaveState(); })) return;
-            if (CheckBinding(_config.MoveUp, e, () => { Location = new Point(Location.X, Location.Y - 5); SaveState(); })) return;
-            if (CheckBinding(_config.MoveDown, e, () => { Location = new Point(Location.X, Location.Y + 5); SaveState(); })) return;
+            // Monitor hotkey: arm on press, execute once on release.
+            if (TryArmMonitorHotkey(e))
+                return;
+
+            // Movement is continuous and driven by _manipulationTimer.
+            if (MatchesMovementBinding(_config.MoveLeft, e) ||
+                MatchesMovementBinding(_config.MoveRight, e) ||
+                MatchesMovementBinding(_config.MoveUp, e) ||
+                MatchesMovementBinding(_config.MoveDown, e))
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+
             if (CheckBinding(_config.ZoomIn, e, () => { _zoomFactor = Math.Min(3.0, _zoomFactor + 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); UpdateManipulationInfo(); })) return;
             if (CheckBinding(_config.ZoomOut, e, () => { _zoomFactor = Math.Max(0.3, _zoomFactor - 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); UpdateManipulationInfo(); })) return;
             if (CheckBinding(_config.ToggleClickable, e, ToggleClickable)) return;
-            if (CheckBinding(_config.MoveMonitor, e, MoveToNextMonitor)) return;
             if (CheckBinding(_config.ResizeWidthDecrease, e, () => { Size = new Size(Math.Max(100, Width - _config.ResizeStep), Height); SaveState(); })) return;
             if (CheckBinding(_config.ResizeWidthIncrease, e, () => { Size = new Size(Width + _config.ResizeStep, Height); SaveState(); })) return;
             if (CheckBinding(_config.ResizeHeightDecrease, e, () => { Size = new Size(Width, Math.Max(100, Height - _config.ResizeStep)); SaveState(); })) return;
             if (CheckBinding(_config.ResizeHeightIncrease, e, () => { Size = new Size(Width, Height + _config.ResizeStep); SaveState(); })) return;
+        }
+
+        private void OnKeyUp(object sender, KeyEventArgs e)
+        {
+            if (!_monitorHotkeyArmed)
+                return;
+
+            if (e.KeyCode == _monitorHotkeyKey)
+            {
+                KeyBinding kb;
+                try { kb = KeyBinding.Parse(_config.MoveMonitor); }
+                catch { kb = new KeyBinding(Keys.None); }
+
+                bool modifiersStillDown =
+                    (!kb.Ctrl || IsKeyDown(VK_CONTROL)) &&
+                    (!kb.Shift || IsKeyDown(VK_SHIFT)) &&
+                    (!kb.Alt || IsKeyDown(VK_MENU));
+
+                bool shouldMove = modifiersStillDown &&
+                    WindowManager.ActiveWindow == this &&
+                    !WindowManager.IsLockMode &&
+                    !_isLocked;
+
+                _monitorHotkeyArmed = false;
+                _monitorHotkeyKey = Keys.None;
+
+                if (shouldMove)
+                    MoveToNextMonitor();
+
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.Control || e.KeyCode == Keys.Shift || e.KeyCode == Keys.Menu)
+            {
+                if (!IsKeyDown((int)e.KeyCode))
+                {
+                    _monitorHotkeyArmed = false;
+                    _monitorHotkeyKey = Keys.None;
+                }
+            }
+        }
+
+        private bool TryArmMonitorHotkey(KeyEventArgs e)
+        {
+            try
+            {
+                var kb = KeyBinding.Parse(_config.MoveMonitor);
+                if (kb.Key == Keys.None || !kb.Matches(e.KeyData))
+                    return false;
+
+                _monitorHotkeyArmed = true;
+                _monitorHotkeyKey = kb.Key;
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool MatchesMovementBinding(string binding, KeyEventArgs e)
+        {
+            try { return KeyBinding.Parse(binding).Matches(e.KeyData); }
+            catch { return false; }
+        }
+
+        private void ApplyHeldMovement()
+        {
+            if (!_manipulationMode || WindowManager.IsLockMode || WindowManager.ActiveWindow != this || _isLocked)
+                return;
+
+            int dx = 0;
+            int dy = 0;
+
+            if (IsBindingHeld(_config.MoveLeft)) dx -= 2;
+            if (IsBindingHeld(_config.MoveRight)) dx += 2;
+            if (IsBindingHeld(_config.MoveUp)) dy -= 2;
+            if (IsBindingHeld(_config.MoveDown)) dy += 2;
+
+            if (dx == 0 && dy == 0)
+                return;
+
+            Location = new Point(Left + dx, Top + dy);
+            UpdateManipulationInfo();
+        }
+
+        private static bool IsBindingHeld(string binding)
+        {
+            try
+            {
+                var kb = KeyBinding.Parse(binding);
+                if (kb.Key == Keys.None)
+                    return false;
+                if (kb.Ctrl != IsKeyDown(VK_CONTROL))
+                    return false;
+                if (kb.Shift != IsKeyDown(VK_SHIFT))
+                    return false;
+                if (kb.Alt != IsKeyDown(VK_MENU))
+                    return false;
+                return IsKeyDown((int)kb.Key);
+            }
+            catch { return false; }
+        }
+
+        private static bool IsKeyDown(int vKey)
+            => (GetAsyncKeyState(vKey) & KEY_DOWN_MASK) != 0;
+
+        private void FlushDeferredStateSave()
+        {
+            if (!_stateDirty)
+                return;
+            if (DateTime.UtcNow - _lastDeferredSaveUtc < TimeSpan.FromMilliseconds(250))
+                return;
+
+            SaveState();
+            _lastDeferredSaveUtc = DateTime.UtcNow;
+            _stateDirty = false;
         }
 
         private bool CheckBinding(string binding, KeyEventArgs e, Action action)
@@ -1089,10 +1275,35 @@ namespace WebOverlay
 
         private string GetStateFilePath()
         {
-            string safe = string.Join("_", (url ?? "WebOverlay").Split(Path.GetInvalidFileNameChars()));
-            if (safe.Length > 200)
-                safe = safe[..200];
+            return GetStateFilePath(Screen.FromHandle(Handle));
+        }
+
+        private string GetStateFilePath(Screen monitor)
+        {
+            string safe = GetSafeFilePart(url ?? "WebOverlay");
+            string monitorKey = GetMonitorKey(monitor);
+            return Path.Combine(configDir, safe + "__monitor_" + monitorKey + ".txt");
+        }
+
+        private string GetLegacyStateFilePath()
+        {
+            string safe = GetSafeFilePart(url ?? "WebOverlay");
             return Path.Combine(configDir, safe + ".txt");
+        }
+
+        private static string GetSafeFilePart(string value)
+        {
+            string safe = string.Join("_", value.Split(Path.GetInvalidFileNameChars()));
+            if (safe.Length > 180)
+                safe = safe[..180];
+            return safe;
+        }
+
+        private static string GetMonitorKey(Screen monitor)
+        {
+            string name = monitor?.DeviceName ?? "PRIMARY";
+            var chars = name.Where(char.IsLetterOrDigit).ToArray();
+            return chars.Length == 0 ? "PRIMARY" : new string(chars);
         }
 
         private static Screen GetDefaultEts2Screen()
@@ -1120,42 +1331,136 @@ namespace WebOverlay
 
         private void LoadState()
         {
-            string path = GetStateFilePath();
-            if (!File.Exists(path))
-            {
-                var screen = GetDefaultEts2Screen();
-                if (screen != null)
-                {
-                    var area = screen.WorkingArea;
-                    Location = new Point(area.Left + Math.Max(0, (area.Width - Width) / 2), area.Top + Math.Max(0, (area.Height - Height) / 2));
-                }
+            Screen monitor;
+            try { monitor = Screen.FromHandle(Handle); }
+            catch { monitor = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault(); }
 
-                if (url.Contains("help.html", StringComparison.OrdinalIgnoreCase))
+            _stateApplying = true;
+            try
+            {
+                if (!LoadStateForMonitor(monitor, allowLegacy: true))
                 {
-                    Location = new Point(screen?.WorkingArea.Left + 560 ?? 560, screen?.WorkingArea.Top + 15 ?? 15);
-                    Size = new Size(800, 1000);
+                    ApplyDefaultState(monitor);
+                    SaveStateForMonitor(monitor);
                 }
-                return;
             }
+            finally
+            {
+                _stateApplying = false;
+                _stateDirty = false;
+            }
+        }
+
+        private bool LoadStateForMonitor(Screen monitor, bool allowLegacy)
+        {
+            string path = GetStateFilePath(monitor);
+            if (TryLoadStateFile(path))
+                return true;
+
+            if (allowLegacy)
+            {
+                string legacy = GetLegacyStateFilePath();
+                if (TryLoadStateFile(legacy))
+                {
+                    SaveStateForMonitor(monitor);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool TryLoadStateFile(string path)
+        {
+            if (!File.Exists(path))
+                return false;
 
             try
             {
-                string[] lines = File.ReadAllLines(path);
-                if (lines.Length >= 5)
-                {
-                    int x = int.Parse(lines[0]);
-                    int y = int.Parse(lines[1]);
-                    double zoom = double.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture);
-                    int w = int.Parse(lines[3]);
-                    int h = int.Parse(lines[4]);
-                    Location = new Point(x, y);
-                    _zoomFactor = zoom;
-                    Size = new Size(w, h);
-                }
+                string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+                if (lines.Length < 5)
+                    return false;
+
+                int x = int.Parse(lines[0]);
+                int y = int.Parse(lines[1]);
+                double zoom = double.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture);
+                int w = int.Parse(lines[3]);
+                int h = int.Parse(lines[4]);
+
+                Location = new Point(x, y);
+                _zoomFactor = Math.Clamp(zoom, 0.3, 3.0);
+                Size = new Size(Math.Max(100, w), Math.Max(100, h));
+                if (webView != null)
+                    webView.ZoomFactor = _zoomFactor;
+                return true;
             }
             catch (Exception ex)
             {
                 Log($"LoadState ошибка: {ex.Message}");
+                return false;
+            }
+        }
+
+        private void ApplyDefaultState(Screen monitor)
+        {
+            _zoomFactor = 1.0;
+            Size = new Size(800, 600);
+
+            var screen = monitor ?? Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
+            if (screen == null)
+            {
+                Location = new Point(100, 100);
+                return;
+            }
+
+            var area = screen.WorkingArea;
+            int x = area.Left + Math.Max(0, (area.Width - Width) / 2);
+            int y = area.Top + Math.Max(0, (area.Height - Height) / 2);
+
+            if (url.Contains("help.html", StringComparison.OrdinalIgnoreCase))
+            {
+                x = Math.Min(area.Right - Width, area.Left + 560);
+                y = area.Top + 15;
+                Size = new Size(800, 1000);
+            }
+
+            Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
+            if (webView != null)
+                webView.ZoomFactor = _zoomFactor;
+        }
+
+        private void SaveStateForMonitor(Screen monitor)
+        {
+            try
+            {
+                Directory.CreateDirectory(configDir);
+                File.WriteAllLines(GetStateFilePath(monitor), new[]
+                {
+                    Location.X.ToString(),
+                    Location.Y.ToString(),
+                    _zoomFactor.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Width.ToString(),
+                    Height.ToString()
+                }, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Log($"SaveStateForMonitor ошибка: {ex.Message}");
+            }
+        }
+
+        private void SaveState()
+        {
+            try
+            {
+                Screen monitor;
+                try { monitor = Screen.FromHandle(Handle); }
+                catch { monitor = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault(); }
+                SaveStateForMonitor(monitor);
+            }
+            catch (Exception ex)
+            {
+                Log($"SaveState ошибка: {ex.Message}");
             }
         }
 
@@ -1201,7 +1506,7 @@ namespace WebOverlay
             _config.Clickable = _clickable;
             Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
 
-            for (int id = 1; id <= 6; id++)
+            for (int id = 1; id <= 5; id++)
             {
                 try { UnregisterHotKey(Handle, id); } catch { }
             }
@@ -1219,7 +1524,9 @@ namespace WebOverlay
 
     public class WindowInfoForm : Form
     {
-        private readonly Label _label;
+        private readonly SignatureBackgroundForm _backgroundForm;
+        private string _displayText = string.Empty;
+
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_TRANSPARENT = 0x00000020;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -1238,22 +1545,12 @@ namespace WebOverlay
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
             TopMost = true;
-            BackColor = Color.FromArgb(35, 35, 35);
-            ForeColor = Color.White;
-            Padding = new Padding(4, 1, 4, 1);
+            BackColor = Color.Fuchsia;
+            TransparencyKey = Color.Fuchsia;
+            Width = 300;
             Height = 18;
-
-            _label = new Label
-            {
-                Dock = DockStyle.Fill,
-                AutoSize = false,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
-                ForeColor = Color.White,
-                BackColor = Color.Transparent,
-                AutoEllipsis = true
-            };
-            Controls.Add(_label);
+            DoubleBuffered = true;
+            _backgroundForm = new SignatureBackgroundForm();
         }
 
         protected override bool ShowWithoutActivation => true;
@@ -1263,25 +1560,57 @@ namespace WebOverlay
             if (owner == null || owner.IsDisposed)
                 return;
 
-            _label.Text = text;
+            _displayText = text ?? string.Empty;
+            var screen = Screen.FromHandle(owner.Handle);
             int width = Math.Max(260, Math.Min(1000, owner.Width));
-            Width = width;
             int x = owner.Left;
             int y = owner.Top - Height - 2;
-            if (y < Screen.FromHandle(owner.Handle).WorkingArea.Top)
-                y = owner.Top + 1;
 
-            Location = new Point(x, y);
-            TopMost = true;
-            if (!Visible)
-                Show(owner);
-
-            if (IsHandleCreated)
+            if (y < screen.WorkingArea.Top)
             {
-                int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);
-                exStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-                SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
+                // At the top edge, place the signature below the window instead of covering its border.
+                y = Math.Min(owner.Bottom + 2, screen.WorkingArea.Bottom - Height);
+                if (y < screen.WorkingArea.Top)
+                    y = screen.WorkingArea.Top;
             }
+
+            Size = new Size(width, Height);
+            Location = new Point(x, y);
+            _backgroundForm.Bounds = new Rectangle(x, y, width, Height);
+
+            if (!_backgroundForm.Visible)
+                _backgroundForm.Show(owner);
+            if (!Visible)
+                base.Show(owner);
+
+            TopMost = true;
+            _backgroundForm.TopMost = true;
+            ApplyClickThrough(_backgroundForm);
+            ApplyClickThrough(this);
+            _backgroundForm.BringToFront();
+            BringToFront();
+            Invalidate();
+        }
+
+        public new void Hide()
+        {
+            try { base.Hide(); } catch { }
+            try { _backgroundForm.Hide(); } catch { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (string.IsNullOrEmpty(_displayText))
+                return;
+
+            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+            using var font = new Font("Segoe UI", 7.5f, FontStyle.Regular, GraphicsUnit.Point);
+            using var shadow = new SolidBrush(Color.FromArgb(230, 0, 0, 0));
+            using var text = new SolidBrush(Color.White);
+
+            e.Graphics.DrawString(_displayText, font, shadow, 5f, 1f);
+            e.Graphics.DrawString(_displayText, font, text, 4f, 0f);
         }
 
         protected override void WndProc(ref Message m)
@@ -1293,5 +1622,56 @@ namespace WebOverlay
             }
             base.WndProc(ref m);
         }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                try { _backgroundForm.Close(); } catch { }
+                try { _backgroundForm.Dispose(); } catch { }
+            }
+            base.Dispose(disposing);
+        }
+
+        private static void ApplyClickThrough(Form form)
+        {
+            if (!form.IsHandleCreated)
+                return;
+
+            int exStyle = GetWindowLong(form.Handle, GWL_EXSTYLE);
+            exStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            SetWindowLong(form.Handle, GWL_EXSTYLE, exStyle);
+        }
+
+        private sealed class SignatureBackgroundForm : Form
+        {
+            private const int WM_NCHITTEST = 0x0084;
+            private const int HTTRANSPARENT = -1;
+
+            public SignatureBackgroundForm()
+            {
+                FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.Manual;
+                ShowInTaskbar = false;
+                TopMost = true;
+                BackColor = Color.Black;
+                Opacity = 0.25;
+                Width = 300;
+                Height = 18;
+            }
+
+            protected override bool ShowWithoutActivation => true;
+
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == WM_NCHITTEST)
+                {
+                    m.Result = new IntPtr(HTTRANSPARENT);
+                    return;
+                }
+                base.WndProc(ref m);
+            }
+        }
     }
+
 }
