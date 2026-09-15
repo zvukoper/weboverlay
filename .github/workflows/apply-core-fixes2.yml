@@ -23,6 +23,8 @@ jobs:
             echo 'Core fixes already integrated.'
             exit 0
           fi
+
+          sed -i 's/private void SetContentVisible/public void SetContentVisible/' tools/apply_core_fixes.py
           python3 tools/apply_core_fixes.py
           grep -q 'CORE_FIXES_V2' Program.cs
 
