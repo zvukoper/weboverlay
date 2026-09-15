@@ -15,6 +15,7 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace WebOverlay
 {
+    // CI trigger check: no runtime behavior change.
     public class AppConfig
     {
         public string Language { get; set; } = "en";
@@ -1465,7 +1466,6 @@ namespace WebOverlay
             }
         }
 
-
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == WM_NCHITTEST && !_clickable)
@@ -1658,5 +1658,3 @@ namespace WebOverlay
     }
 
 }
-
-
