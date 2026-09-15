@@ -1,0 +1,226 @@
+from pathlib import Path
+
+path = Path('Program.cs')
+text = path.read_text(encoding='utf-8-sig')
+
+if 'CORE_FIXES_V2' in text:
+    print('Core fixes already present.')
+    raise SystemExit(0)
+
+
+def replace_method(source: str, signature: str, replacement: str) -> str:
+    start = source.index(signature)
+    brace = source.index('{', start)
+    depth = 0
+    for i in range(brace, len(source)):
+        if source[i] == '{':
+            depth += 1
+        elif source[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return source[:start] + replacement + source[i + 1:]
+    raise RuntimeError(f'End not found for {signature}')
+
+text = '// CORE_FIXES_V2\n' + text
+
+text = text.replace(
+    '        private WindowInfoForm _infoForm;\n',
+    '''        private WindowInfoForm _infoForm;\n        private readonly System.Windows.Forms.Timer _manipulationTimer;\n        private bool _stateDirty;\n        private DateTime _lastDeferredSaveUtc = DateTime.MinValue;\n        private bool _monitorHotkeyArmed;\n        private Keys _monitorHotkeyKey = Keys.None;\n        private bool _stateApplying;\n''', 1)
+
+text = text.replace(
+    '        private const int HTTRANSPARENT = -1;\n',
+    '''        private const int HTTRANSPARENT = -1;\n        private const short KEY_DOWN_MASK = unchecked((short)0x8000);\n        private const int VK_CONTROL = 0x11;\n        private const int VK_SHIFT = 0x10;\n        private const int VK_MENU = 0x12;\n''', 1)
+
+old_unreg = '''        [DllImport("user32.dll")]\n        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);\n'''
+new_unreg = '''        [DllImport("user32.dll")]\n        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);\n        [DllImport("user32.dll")]\n        private static extern short GetAsyncKeyState(int vKey);\n'''
+text = text.replace(old_unreg, new_unreg, 1)
+
+old_events = '''            LocationChanged += (s, e) => UpdateManipulationInfo();\n            SizeChanged += (s, e) => UpdateManipulationInfo();\n'''
+new_events = '''            LocationChanged += (s, e) =>\n            {\n                if (!_stateApplying)\n                    _stateDirty = true;\n                UpdateManipulationInfo();\n            };\n            SizeChanged += (s, e) =>\n            {\n                if (!_stateApplying)\n                    _stateDirty = true;\n                UpdateManipulationInfo();\n            };\n            KeyUp += OnKeyUp;\n\n            _manipulationTimer = new System.Windows.Forms.Timer { Interval = 15 };\n            _manipulationTimer.Tick += (_, _) =>\n            {\n                ApplyHeldMovement();\n                FlushDeferredStateSave();\n            };\n            _manipulationTimer.Start();\n'''
+if old_events not in text:
+    raise RuntimeError('Constructor events not found')
+text = text.replace(old_events, new_events, 1)
+
+text = replace_method(text, '        private async void InitializeWebView()', '''        private async void InitializeWebView()\n        {\n            webView = new WebView2\n            {\n                Dock = DockStyle.Fill,\n                DefaultBackgroundColor = Color.Transparent,\n                Visible = true\n            };\n\n            Controls.Add(webView);\n            webView.KeyDown += (s, e) => OnKeyDown(s, e);\n            webView.KeyUp += (s, e) => OnKeyUp(s, e);\n            webView.PreviewKeyDown += (s, e) =>\n            {\n                if (e.KeyCode == Keys.Escape || e.Control || e.Shift || e.Alt)\n                    e.IsInputKey = true;\n            };\n\n            try\n            {\n                await webView.EnsureCoreWebView2Async(null);\n                webView.CoreWebView2.NavigationCompleted += (s, e) =>\n                {\n                    try\n                    {\n                        LoadState();\n                        webView.ZoomFactor = _zoomFactor;\n                        webView.Visible = _manipulationMode || _contentVisible;\n                        webView.BringToFront();\n                        if (_manipulationMode)\n                            DebugShowIfAvailable();\n                    }\n                    catch (Exception ex)\n                    {\n                        Log($"NavigationCompleted error: {ex.Message}");\n                    }\n                };\n\n                webView.CoreWebView2.WebMessageReceived += (s, e) =>\n                {\n                    try\n                    {\n                        if (e.TryGetWebMessageAsString() == "toggle")\n                            WindowManager.ToggleLockMode();\n                    }\n                    catch { }\n                };\n\n                webView.CoreWebView2.Navigate(url);\n            }\n            catch (Exception ex)\n            {\n                Log($"InitializeWebView ошибка: {ex.Message}");\n                MessageBox.Show($"WebView2 error: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);\n                Close();\n            }\n        }''')
+
+text = replace_method(text, '        public void SetManipulationMode(bool enabled)', '''        public void SetManipulationMode(bool enabled)\n        {\n            if (_manipulationMode == enabled)\n            {\n                UpdateManipulationInfo();\n                if (enabled)\n                    DebugShowIfAvailable();\n                return;\n            }\n\n            _manipulationMode = enabled;\n            if (enabled)\n            {\n                _visibilityBeforeManipulation = _contentVisible;\n                if (webView != null)\n                    webView.Visible = true;\n                if (!IsHandleCreated)\n                    CreateHandle();\n                Show();\n                BringToFront();\n                _infoForm ??= new WindowInfoForm();\n                _infoForm.Show();\n                UpdateManipulationInfo();\n                DebugShowIfAvailable();\n            }\n            else\n            {\n                if (webView != null)\n                    webView.Visible = _visibilityBeforeManipulation;\n                if (_infoForm != null)\n                {\n                    _infoForm.Hide();\n                    _infoForm.Dispose();\n                    _infoForm = null;\n                }\n                UpdateManipulationInfo();\n            }\n        }''')
+
+text = replace_method(text, '        public void MoveToNextMonitor()', '''        public void MoveToNextMonitor()\n        {\n            var screens = Screen.AllScreens\n                .OrderBy(s => s.Bounds.Left)\n                .ThenBy(s => s.Bounds.Top)\n                .ThenBy(s => s.DeviceName, StringComparer.OrdinalIgnoreCase)\n                .ToArray();\n\n            if (screens.Length <= 1)\n                return;\n\n            Screen current = Screen.FromHandle(Handle);\n            int currentIndex = Array.FindIndex(screens, s =>\n                string.Equals(s.DeviceName, current.DeviceName, StringComparison.OrdinalIgnoreCase));\n            if (currentIndex < 0)\n                currentIndex = 0;\n\n            Screen target = screens[(currentIndex + 1) % screens.Length];\n\n            // Every monitor owns its own position/size/zoom state.\n            SaveStateForMonitor(current);\n\n            _stateApplying = true;\n            try\n            {\n                if (!LoadStateForMonitor(target, allowLegacy: false))\n                {\n                    ApplyDefaultState(target);\n                    SaveStateForMonitor(target);\n                }\n            }\n            finally\n            {\n                _stateApplying = false;\n                _stateDirty = false;\n            }\n\n            UpdateManipulationInfo();\n            Log($"MoveToNextMonitor: {current.DeviceName} -> {target.DeviceName}, location={Location.X},{Location.Y}");\n        }''')
+
+text = replace_method(text, '        private void OnKeyDown(object sender, KeyEventArgs e)', '''        private void OnKeyDown(object sender, KeyEventArgs e)\n        {\n            if (e.KeyCode == Keys.Escape && !e.Control && !e.Shift && !e.Alt)\n            {\n                SaveState();\n                Close();\n                e.Handled = true;\n                return;\n            }\n\n            if (WindowManager.ActiveWindow != this || WindowManager.IsLockMode || _isLocked)\n                return;\n\n            // Monitor hotkey: arm on press, execute once on release.\n            if (TryArmMonitorHotkey(e))\n                return;\n\n            // Movement is continuous and driven by _manipulationTimer.\n            if (MatchesMovementBinding(_config.MoveLeft, e) ||\n                MatchesMovementBinding(_config.MoveRight, e) ||\n                MatchesMovementBinding(_config.MoveUp, e) ||\n                MatchesMovementBinding(_config.MoveDown, e))\n            {\n                e.Handled = true;\n                e.SuppressKeyPress = true;\n                return;\n            }\n\n            if (CheckBinding(_config.ZoomIn, e, () => { _zoomFactor = Math.Min(3.0, _zoomFactor + 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); UpdateManipulationInfo(); })) return;\n            if (CheckBinding(_config.ZoomOut, e, () => { _zoomFactor = Math.Max(0.3, _zoomFactor - 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); UpdateManipulationInfo(); })) return;\n            if (CheckBinding(_config.ToggleClickable, e, ToggleClickable)) return;\n            if (CheckBinding(_config.ResizeWidthDecrease, e, () => { Size = new Size(Math.Max(100, Width - _config.ResizeStep), Height); SaveState(); })) return;\n            if (CheckBinding(_config.ResizeWidthIncrease, e, () => { Size = new Size(Width + _config.ResizeStep, Height); SaveState(); })) return;\n            if (CheckBinding(_config.ResizeHeightDecrease, e, () => { Size = new Size(Width, Math.Max(100, Height - _config.ResizeStep)); SaveState(); })) return;\n            if (CheckBinding(_config.ResizeHeightIncrease, e, () => { Size = new Size(Width, Height + _config.ResizeStep); SaveState(); })) return;\n        }\n\n        private void OnKeyUp(object sender, KeyEventArgs e)\n        {\n            if (!_monitorHotkeyArmed)\n                return;\n\n            if (e.KeyCode == _monitorHotkeyKey)\n            {\n                KeyBinding kb;\n                try { kb = KeyBinding.Parse(_config.MoveMonitor); }\n                catch { kb = new KeyBinding(Keys.None); }\n\n                bool modifiersStillDown =\n                    (!kb.Ctrl || IsKeyDown(VK_CONTROL)) &&\n                    (!kb.Shift || IsKeyDown(VK_SHIFT)) &&\n                    (!kb.Alt || IsKeyDown(VK_MENU));\n\n                bool shouldMove = modifiersStillDown &&\n                    WindowManager.ActiveWindow == this &&\n                    !WindowManager.IsLockMode &&\n                    !_isLocked;\n\n                _monitorHotkeyArmed = false;\n                _monitorHotkeyKey = Keys.None;\n\n                if (shouldMove)\n                    MoveToNextMonitor();\n\n                e.Handled = true;\n                e.SuppressKeyPress = true;\n            }\n            else if (e.KeyCode == Keys.Control || e.KeyCode == Keys.Shift || e.KeyCode == Keys.Menu)\n            {\n                if (!IsKeyDown((int)e.KeyCode))\n                {\n                    _monitorHotkeyArmed = false;\n                    _monitorHotkeyKey = Keys.None;\n                }\n            }\n        }\n\n        private bool TryArmMonitorHotkey(KeyEventArgs e)\n        {\n            try\n            {\n                var kb = KeyBinding.Parse(_config.MoveMonitor);\n                if (kb.Key == Keys.None || !kb.Matches(e.KeyData))\n                    return false;\n\n                _monitorHotkeyArmed = true;\n                _monitorHotkeyKey = kb.Key;\n                e.Handled = true;\n                e.SuppressKeyPress = true;\n                return true;\n            }\n            catch\n            {\n                return false;\n            }\n        }\n\n        private static bool MatchesMovementBinding(string binding, KeyEventArgs e)\n        {\n            try { return KeyBinding.Parse(binding).Matches(e.KeyData); }\n            catch { return false; }\n        }\n\n        private void ApplyHeldMovement()\n        {\n            if (!_manipulationMode || WindowManager.IsLockMode || WindowManager.ActiveWindow != this || _isLocked)\n                return;\n\n            int dx = 0;\n            int dy = 0;\n\n            if (IsBindingHeld(_config.MoveLeft)) dx -= 2;\n            if (IsBindingHeld(_config.MoveRight)) dx += 2;\n            if (IsBindingHeld(_config.MoveUp)) dy -= 2;\n            if (IsBindingHeld(_config.MoveDown)) dy += 2;\n\n            if (dx == 0 && dy == 0)\n                return;\n\n            Location = new Point(Left + dx, Top + dy);\n            UpdateManipulationInfo();\n        }\n\n        private static bool IsBindingHeld(string binding)\n        {\n            try\n            {\n                var kb = KeyBinding.Parse(binding);\n                if (kb.Key == Keys.None)\n                    return false;\n                if (kb.Ctrl != IsKeyDown(VK_CONTROL))\n                    return false;\n                if (kb.Shift != IsKeyDown(VK_SHIFT))\n                    return false;\n                if (kb.Alt != IsKeyDown(VK_MENU))\n                    return false;\n                return IsKeyDown((int)kb.Key);\n            }\n            catch { return false; }\n        }\n\n        private static bool IsKeyDown(int vKey)\n            => (GetAsyncKeyState(vKey) & KEY_DOWN_MASK) != 0;\n\n        private void FlushDeferredStateSave()\n        {\n            if (!_stateDirty)\n                return;\n            if (DateTime.UtcNow - _lastDeferredSaveUtc < TimeSpan.FromMilliseconds(250))\n                return;\n\n            SaveState();\n            _lastDeferredSaveUtc = DateTime.UtcNow;\n            _stateDirty = false;\n        }''')
+
+text = replace_method(text, '        private string GetStateFilePath()', '''        private string GetStateFilePath()\n        {\n            return GetStateFilePath(Screen.FromHandle(Handle));\n        }\n\n        private string GetStateFilePath(Screen monitor)\n        {\n            string safe = GetSafeFilePart(url ?? "WebOverlay");\n            string monitorKey = GetMonitorKey(monitor);\n            return Path.Combine(configDir, safe + "__monitor_" + monitorKey + ".txt");\n        }\n\n        private string GetLegacyStateFilePath()\n        {\n            string safe = GetSafeFilePart(url ?? "WebOverlay");\n            return Path.Combine(configDir, safe + ".txt");\n        }\n\n        private static string GetSafeFilePart(string value)\n        {\n            string safe = string.Join("_", value.Split(Path.GetInvalidFileNameChars()));\n            if (safe.Length > 180)\n                safe = safe[..180];\n            return safe;\n        }\n\n        private static string GetMonitorKey(Screen monitor)\n        {\n            string name = monitor?.DeviceName ?? "PRIMARY";\n            var chars = name.Where(char.IsLetterOrDigit).ToArray();\n            return chars.Length == 0 ? "PRIMARY" : new string(chars);\n        }''')
+
+text = replace_method(text, '        private void LoadState()', '''        private void LoadState()\n        {\n            Screen monitor;\n            try { monitor = Screen.FromHandle(Handle); }\n            catch { monitor = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault(); }\n\n            _stateApplying = true;\n            try\n            {\n                if (!LoadStateForMonitor(monitor, allowLegacy: true))\n                {\n                    ApplyDefaultState(monitor);\n                    SaveStateForMonitor(monitor);\n                }\n            }\n            finally\n            {\n                _stateApplying = false;\n                _stateDirty = false;\n            }\n        }\n\n        private bool LoadStateForMonitor(Screen monitor, bool allowLegacy)\n        {\n            string path = GetStateFilePath(monitor);\n            if (TryLoadStateFile(path))\n                return true;\n\n            if (allowLegacy)\n            {\n                string legacy = GetLegacyStateFilePath();\n                if (TryLoadStateFile(legacy))\n                {\n                    SaveStateForMonitor(monitor);\n                    return true;\n                }\n            }\n\n            return false;\n        }\n\n        private bool TryLoadStateFile(string path)\n        {\n            if (!File.Exists(path))\n                return false;\n\n            try\n            {\n                string[] lines = File.ReadAllLines(path, Encoding.UTF8);\n                if (lines.Length < 5)\n                    return false;\n\n                int x = int.Parse(lines[0]);\n                int y = int.Parse(lines[1]);\n                double zoom = double.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture);\n                int w = int.Parse(lines[3]);\n                int h = int.Parse(lines[4]);\n\n                Location = new Point(x, y);\n                _zoomFactor = Math.Clamp(zoom, 0.3, 3.0);\n                Size = new Size(Math.Max(100, w), Math.Max(100, h));\n                if (webView != null)\n                    webView.ZoomFactor = _zoomFactor;\n                return true;\n            }\n            catch (Exception ex)\n            {\n                Log($"LoadState ошибка: {ex.Message}");\n                return false;\n            }\n        }\n\n        private void ApplyDefaultState(Screen monitor)\n        {\n            _zoomFactor = 1.0;\n            Size = new Size(800, 600);\n\n            var screen = monitor ?? Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();\n            if (screen == null)\n            {\n                Location = new Point(100, 100);\n                return;\n            }\n\n            var area = screen.WorkingArea;\n            int x = area.Left + Math.Max(0, (area.Width - Width) / 2);\n            int y = area.Top + Math.Max(0, (area.Height - Height) / 2);\n\n            if (url.Contains("help.html", StringComparison.OrdinalIgnoreCase))\n            {\n                x = Math.Min(area.Right - Width, area.Left + 560);\n                y = area.Top + 15;\n                Size = new Size(800, 1000);\n            }\n\n            Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));\n            if (webView != null)\n                webView.ZoomFactor = _zoomFactor;\n        }\n\n        private void SaveStateForMonitor(Screen monitor)\n        {\n            try\n            {\n                Directory.CreateDirectory(configDir);\n                File.WriteAllLines(GetStateFilePath(monitor), new[]\n                {\n                    Location.X.ToString(),\n                    Location.Y.ToString(),\n                    _zoomFactor.ToString(System.Globalization.CultureInfo.InvariantCulture),\n                    Width.ToString(),\n                    Height.ToString()\n                }, Encoding.UTF8);\n            }\n            catch (Exception ex)\n            {\n                Log($"SaveStateForMonitor ошибка: {ex.Message}");\n            }\n        }\n\n        private void SaveState()\n        {\n            try\n            {\n                Screen monitor;\n                try { monitor = Screen.FromHandle(Handle); }\n                catch { monitor = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault(); }\n                SaveStateForMonitor(monitor);\n            }\n            catch (Exception ex)\n            {\n                Log($"SaveState ошибка: {ex.Message}");\n            }\n        }''')
+
+anchor = '        private void SetContentVisible(bool visible)'
+helper = '''        private void DebugShowIfAvailable()\n        {\n            try\n            {\n                if (!_manipulationMode || webView?.CoreWebView2 == null)\n                    return;\n\n                _ = webView.CoreWebView2.ExecuteScriptAsync(\n                    "try { if (typeof debugShow === 'function') debugShow(); } catch (e) {}; ");\n            }\n            catch (Exception ex)\n            {\n                Log($"debugShow error: {ex.Message}");\n            }\n        }\n\n'''
+if anchor not in text:
+    raise RuntimeError('SetContentVisible anchor not found')
+text = text.replace(anchor, helper + anchor, 1)
+
+text = text.replace('        private const int HOTKEY_MOVE_MONITOR = 6;\n', '', 1)
+text = text.replace('                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_MOVE_MONITOR, _config.MoveMonitor);\n', '', 1)
+
+text = replace_method(text, '        public static void ProcessHotkey(int id)', '''        public static void ProcessHotkey(int id)\n        {\n            switch (id)\n            {\n                case HOTKEY_TOGGLE_LOCK:\n                    WindowManager.ToggleLockMode();\n                    break;\n                case HOTKEY_TOGGLE_HIDE:\n                    if (WindowManager.IsLockMode)\n                        WindowManager.ToggleHideAll();\n                    else\n                        WindowManager.ToggleHideActive();\n                    break;\n                case HOTKEY_PGUP:\n                    WindowManager.PreviousWindow();\n                    break;\n                case HOTKEY_PGDN:\n                    WindowManager.NextWindow();\n                    break;\n                case HOTKEY_TOGGLE_CLICKABLE:\n                    WindowManager.ToggleClickableActive();\n                    break;\n            }\n        }''')
+
+text = text.replace('            for (int id = 1; id <= 6; id++)\n', '            for (int id = 1; id <= 5; id++)\n', 1)
+
+class_start = text.index('    public class WindowInfoForm : Form')
+namespace_end = text.rfind('\n}')
+new_class = r'''    public class WindowInfoForm : Form
+    {
+        private readonly SignatureBackgroundForm _backgroundForm;
+        private string _displayText = string.Empty;
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const int WM_NCHITTEST = 0x0084;
+        private const int HTTRANSPARENT = -1;
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        public WindowInfoForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            TopMost = true;
+            BackColor = Color.Fuchsia;
+            TransparencyKey = Color.Fuchsia;
+            Width = 300;
+            Height = 18;
+            DoubleBuffered = true;
+            _backgroundForm = new SignatureBackgroundForm();
+        }
+
+        protected override bool ShowWithoutActivation => true;
+
+        public void UpdateFor(OverlayForm owner, string text)
+        {
+            if (owner == null || owner.IsDisposed)
+                return;
+
+            _displayText = text ?? string.Empty;
+            var screen = Screen.FromHandle(owner.Handle);
+            int width = Math.Max(260, Math.Min(1000, owner.Width));
+            int x = owner.Left;
+            int y = owner.Top - Height - 2;
+
+            if (y < screen.WorkingArea.Top)
+            {
+                // At the top edge, place the signature below the window instead of covering its border.
+                y = Math.Min(owner.Bottom + 2, screen.WorkingArea.Bottom - Height);
+                if (y < screen.WorkingArea.Top)
+                    y = screen.WorkingArea.Top;
+            }
+
+            Size = new Size(width, Height);
+            Location = new Point(x, y);
+            _backgroundForm.Bounds = new Rectangle(x, y, width, Height);
+
+            if (!_backgroundForm.Visible)
+                _backgroundForm.Show(owner);
+            if (!Visible)
+                base.Show(owner);
+
+            TopMost = true;
+            _backgroundForm.TopMost = true;
+            ApplyClickThrough(_backgroundForm);
+            ApplyClickThrough(this);
+            _backgroundForm.BringToFront();
+            BringToFront();
+            Invalidate();
+        }
+
+        public new void Hide()
+        {
+            try { base.Hide(); } catch { }
+            try { _backgroundForm.Hide(); } catch { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (string.IsNullOrEmpty(_displayText))
+                return;
+
+            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+            using var font = new Font("Segoe UI", 7.5f, FontStyle.Regular, GraphicsUnit.Point);
+            using var shadow = new SolidBrush(Color.FromArgb(230, 0, 0, 0));
+            using var text = new SolidBrush(Color.White);
+
+            e.Graphics.DrawString(_displayText, font, shadow, 5f, 1f);
+            e.Graphics.DrawString(_displayText, font, text, 4f, 0f);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_NCHITTEST)
+            {
+                m.Result = new IntPtr(HTTRANSPARENT);
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                try { _backgroundForm.Close(); } catch { }
+                try { _backgroundForm.Dispose(); } catch { }
+            }
+            base.Dispose(disposing);
+        }
+
+        private static void ApplyClickThrough(Form form)
+        {
+            if (!form.IsHandleCreated)
+                return;
+
+            int exStyle = GetWindowLong(form.Handle, GWL_EXSTYLE);
+            exStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            SetWindowLong(form.Handle, GWL_EXSTYLE, exStyle);
+        }
+
+        private sealed class SignatureBackgroundForm : Form
+        {
+            private const int WM_NCHITTEST = 0x0084;
+            private const int HTTRANSPARENT = -1;
+
+            public SignatureBackgroundForm()
+            {
+                FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.Manual;
+                ShowInTaskbar = false;
+                TopMost = true;
+                BackColor = Color.Black;
+                Opacity = 0.25;
+                Width = 300;
+                Height = 18;
+            }
+
+            protected override bool ShowWithoutActivation => true;
+
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == WM_NCHITTEST)
+                {
+                    m.Result = new IntPtr(HTTRANSPARENT);
+                    return;
+                }
+                base.WndProc(ref m);
+            }
+        }
+    }
+'''
+text = text[:class_start] + new_class + text[namespace_end:]
+
+path.write_text(text, encoding='utf-8-sig')
+print('Core fixes integrated into Program.cs')
