@@ -28,6 +28,7 @@ namespace WebOverlay
         public string ZoomOut { get; set; } = "Ctrl+Shift+Alt+OemMinus";
         public string ToggleHide { get; set; } = "Ctrl+Shift+Alt+P";
         public string ToggleClickable { get; set; } = "Ctrl+Shift+Alt+U";
+        public string MoveMonitor { get; set; } = "Ctrl+Shift+Alt+Oem5";
         public string ResizeWidthDecrease { get; set; } = "Ctrl+Shift+Alt+OemOpenBrackets";
         public string ResizeWidthIncrease { get; set; } = "Ctrl+Shift+Alt+OemCloseBrackets";
         public string ResizeHeightDecrease { get; set; } = "Ctrl+Shift+Alt+OemSemicolon";
@@ -37,7 +38,7 @@ namespace WebOverlay
 
     public static class Localization
     {
-        private static Dictionary<string, string> _strings = new();
+        private static readonly Dictionary<string, string> _strings = new();
         public static string CurrentLanguage { get; private set; } = "en";
 
         public static void Load(string lang, string localesDir)
@@ -47,11 +48,14 @@ namespace WebOverlay
             string path = Path.Combine(localesDir, lang + ".txt");
             if (!File.Exists(path))
                 path = Path.Combine(localesDir, "en.txt");
-            if (!File.Exists(path)) return;
+            if (!File.Exists(path))
+                return;
 
             foreach (var line in File.ReadAllLines(path, Encoding.UTF8))
             {
-                if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#')) continue;
+                if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#'))
+                    continue;
+
                 int idx = line.IndexOf('=');
                 if (idx > 0)
                 {
@@ -90,6 +94,7 @@ namespace WebOverlay
             var parts = str.Split('+');
             bool ctrl = false, shift = false, alt = false;
             Keys key = Keys.None;
+
             foreach (var part in parts)
             {
                 string p = part.Trim();
@@ -99,14 +104,12 @@ namespace WebOverlay
                     shift = true;
                 else if (p.Equals("Alt", StringComparison.OrdinalIgnoreCase))
                     alt = true;
+                else if (Enum.TryParse<Keys>(p, true, out var k))
+                    key = k;
                 else
-                {
-                    if (Enum.TryParse<Keys>(p, true, out var k))
-                        key = k;
-                    else
-                        throw new ArgumentException($"Unknown key: {p}");
-                }
+                    throw new ArgumentException($"Unknown key: {p}");
             }
+
             return new KeyBinding(key, ctrl, shift, alt);
         }
 
@@ -118,15 +121,27 @@ namespace WebOverlay
             Keys key = keyData & Keys.KeyCode;
             return key == Key && ctrl == Ctrl && shift == Shift && alt == Alt;
         }
+
+        public bool TryGetNative(out int modifiers, out int vk)
+        {
+            modifiers = 0;
+            vk = (int)Key;
+            if (Ctrl) modifiers |= Program.MOD_CONTROL;
+            if (Shift) modifiers |= Program.MOD_SHIFT;
+            if (Alt) modifiers |= Program.MOD_ALT;
+            return Key != Keys.None;
+        }
     }
 
     public static class WindowManager
     {
-        private static List<OverlayForm> _windows = new();
+        private static readonly List<OverlayForm> _windows = new();
         private static int _activeIndex = -1;
         private static bool _isLockMode = true;
 
-        public static OverlayForm ActiveWindow => _activeIndex >= 0 && _activeIndex < _windows.Count ? _windows[_activeIndex] : null;
+        public static OverlayForm ActiveWindow =>
+            _activeIndex >= 0 && _activeIndex < _windows.Count ? _windows[_activeIndex] : null;
+
         public static bool IsLockMode => _isLockMode;
         public static IReadOnlyList<OverlayForm> Windows => _windows.AsReadOnly();
 
@@ -134,10 +149,9 @@ namespace WebOverlay
         {
             var form = new OverlayForm(url, config, appDataDir);
             _windows.Add(form);
-            if (!_isLockMode)
-                form.SetLockState(false);
-            else
-                form.SetLockState(true);
+
+            form.SetManipulationMode(!_isLockMode);
+            form.SetLockState(_isLockMode);
 
             if (setActive)
                 SetActive(_windows.Count - 1);
@@ -153,33 +167,43 @@ namespace WebOverlay
             }
 
             Program.Log($"WindowManager: создано окно {url}, active={setActive}, всего окон {_windows.Count}");
+            form.UpdateManipulationInfo();
             return form;
         }
 
         public static void AddWindow(OverlayForm window)
         {
-            _windows.Add(window);
+            if (!_windows.Contains(window))
+                _windows.Add(window);
+
+            if (window.IsDisposed)
+                return;
+
+            window.SetManipulationMode(!_isLockMode);
+            window.SetLockState(_isLockMode);
             window.Show();
             SetActive(_windows.Count - 1);
-            if (!_isLockMode)
-                window.SetLockState(false);
-            else
-                window.SetLockState(true);
         }
 
         public static void RemoveWindow(OverlayForm window)
         {
             int idx = _windows.IndexOf(window);
-            if (idx >= 0)
+            if (idx < 0)
+                return;
+
+            _windows.RemoveAt(idx);
+            if (_windows.Count == 0)
             {
-                _windows.RemoveAt(idx);
-                if (_windows.Count == 0)
-                    _activeIndex = -1;
-                else if (_activeIndex >= _windows.Count)
-                    _activeIndex = _windows.Count - 1;
-                else if (_activeIndex == idx)
-                    SetActive(Math.Min(idx, _windows.Count - 1));
+                _activeIndex = -1;
+                return;
             }
+
+            if (_activeIndex > idx)
+                _activeIndex--;
+            else if (_activeIndex >= _windows.Count)
+                _activeIndex = _windows.Count - 1;
+
+            UpdateBorders();
         }
 
         public static void SetActive(int index)
@@ -189,6 +213,7 @@ namespace WebOverlay
                 _activeIndex = -1;
                 return;
             }
+
             _activeIndex = index;
             Program.Log($"WindowManager: SetActive({index})");
             UpdateBorders();
@@ -197,12 +222,7 @@ namespace WebOverlay
             {
                 var active = ActiveWindow;
                 foreach (var w in _windows)
-                {
-                    if (w == active)
-                        w.SetLockState(false);
-                    else
-                        w.SetLockState(true);
-                }
+                    w.SetLockState(w != active);
             }
         }
 
@@ -210,18 +230,9 @@ namespace WebOverlay
         {
             foreach (var w in _windows)
             {
-                bool isActive = (w == ActiveWindow);
-                if (!_isLockMode)
-                {
-                    if (isActive)
-                        w.UpdateSelectionBorder(true, false);
-                    else
-                        w.UpdateSelectionBorder(false, true);
-                }
-                else
-                {
-                    w.UpdateSelectionBorder(false, false);
-                }
+                bool isActive = w == ActiveWindow;
+                w.UpdateSelectionBorder(!_isLockMode && isActive, !_isLockMode && !isActive);
+                w.SetManipulationMode(!_isLockMode);
             }
         }
 
@@ -230,6 +241,12 @@ namespace WebOverlay
             _isLockMode = !_isLockMode;
             Program.Log($"WindowManager: ToggleLockMode, режим={(_isLockMode ? "выключен" : "включен")}");
 
+            if (!_isLockMode && _windows.Count > 0 && ActiveWindow == null)
+                _activeIndex = 0;
+
+            foreach (var w in _windows)
+                w.SetManipulationMode(!_isLockMode);
+
             if (_isLockMode)
             {
                 foreach (var w in _windows)
@@ -237,66 +254,54 @@ namespace WebOverlay
             }
             else
             {
-                if (_windows.Count > 0)
-                    SetActive(0);
-
                 var active = ActiveWindow;
-                if (active != null)
-                    active.SetLockState(false);
-
                 foreach (var w in _windows)
-                    if (w != active)
-                        w.SetLockState(true);
-
-                if (active == null && _windows.Count > 0)
-                {
-                    _windows[0].SetLockState(false);
-                    SetActive(0);
-                }
+                    w.SetLockState(w != active);
             }
+
             UpdateBorders();
         }
 
         public static void NextWindow()
         {
-            if (_windows.Count == 0 || _isLockMode) return;
-            int newIdx = (_activeIndex + 1) % _windows.Count;
-            Program.Log($"WindowManager: NextWindow from {_activeIndex} to {newIdx}");
-            SetActive(newIdx);
+            if (_windows.Count == 0 || _isLockMode)
+                return;
+
+            SetActive((_activeIndex + 1) % _windows.Count);
         }
 
         public static void PreviousWindow()
         {
-            if (_windows.Count == 0 || _isLockMode) return;
-            int newIdx = (_activeIndex - 1 + _windows.Count) % _windows.Count;
-            Program.Log($"WindowManager: PreviousWindow from {_activeIndex} to {newIdx}");
-            SetActive(newIdx);
+            if (_windows.Count == 0 || _isLockMode)
+                return;
+
+            SetActive((_activeIndex - 1 + _windows.Count) % _windows.Count);
         }
 
         public static void ToggleHideAll()
         {
-            bool allHidden = true;
-            foreach (var w in _windows)
-                if (w.IsContentVisible)
-                {
-                    allHidden = false;
-                    break;
-                }
+            bool allHidden = _windows.Count > 0 && _windows.All(w => !w.IsContentVisible);
             foreach (var w in _windows)
                 w.SetContentVisible(allHidden);
-            Program.Log($"WindowManager: ToggleHideAll, allHidden={allHidden}");
         }
 
         public static void ToggleHideActive()
         {
-            var active = ActiveWindow;
-            if (active != null)
-                active.ToggleContentVisibility();
-            Program.Log($"WindowManager: ToggleHideActive");
+            ActiveWindow?.ToggleContentVisibility();
+        }
+
+        public static void ToggleClickableActive()
+        {
+            ActiveWindow?.ToggleClickable();
+        }
+
+        public static void MoveActiveToNextMonitor()
+        {
+            ActiveWindow?.MoveToNextMonitor();
         }
     }
 
-    class Program
+    internal static class Program
     {
         private static readonly string AppId = "WebOverlayApp";
         public static readonly string PipeName = "WebOverlayPipe";
@@ -307,20 +312,23 @@ namespace WebOverlay
         private static string _logPath;
         private static OverlayForm _firstWindow;
 
-        public static void Log(string msg)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(_logPath))
-                {
-                    string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                    _logPath = Path.Combine(appData, "WebOverlay", "debug.log");
-                    Directory.CreateDirectory(Path.GetDirectoryName(_logPath));
-                }
-                File.AppendAllText(_logPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - {msg}{Environment.NewLine}");
-            }
-            catch { }
-        }
+        internal const int MOD_ALT = 0x0001;
+        internal const int MOD_CONTROL = 0x0002;
+        internal const int MOD_SHIFT = 0x0004;
+
+        private const int HWND_TOPMOST = -1;
+        private const int SWP_NOMOVE = 0x0002;
+        private const int SWP_NOSIZE = 0x0001;
+        private const int SWP_SHOWWINDOW = 0x0040;
+        private const int SW_SHOW = 5;
+
+        private const int HOTKEY_TOGGLE_LOCK = 1;
+        private const int HOTKEY_TOGGLE_HIDE = 2;
+        private const int HOTKEY_PGUP = 3;
+        private const int HOTKEY_PGDN = 4;
+        private const int HOTKEY_TOGGLE_CLICKABLE = 5;
+        private const int HOTKEY_MOVE_MONITOR = 6;
+        private const int WM_HOTKEY = 0x0312;
 
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, int uFlags);
@@ -335,23 +343,8 @@ namespace WebOverlay
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-        private const int HWND_TOPMOST = -1;
-        private const int SWP_NOMOVE = 0x0002;
-        private const int SWP_NOSIZE = 0x0001;
-        private const int SWP_SHOWWINDOW = 0x0040;
-        private const int SW_SHOW = 5;
-        private const int MOD_ALT = 0x0001;
-        private const int MOD_CONTROL = 0x0002;
-        private const int MOD_SHIFT = 0x0004;
-
-        private const int HOTKEY_TOGGLE_LOCK = 1;
-        private const int HOTKEY_TOGGLE_HIDE = 2;
-        private const int HOTKEY_PGUP = 3;
-        private const int HOTKEY_PGDN = 4;
-        private const int WM_HOTKEY = 0x0312;
-
         [STAThread]
-        static void Main(string[] args)
+        private static void Main(string[] args)
         {
             try
             {
@@ -370,15 +363,13 @@ namespace WebOverlay
 
                 bool createdNew;
                 _mutex = new Mutex(true, AppId, out createdNew);
-                Log($"Mutex создан, createdNew={createdNew}");
 
                 string url = null;
                 bool append = false;
                 for (int i = 0; i < args.Length; i++)
                 {
                     string arg = args[i];
-                    if (arg.Equals("-append", StringComparison.OrdinalIgnoreCase) ||
-                        arg.Equals("append", StringComparison.OrdinalIgnoreCase))
+                    if (arg.Equals("-append", StringComparison.OrdinalIgnoreCase) || arg.Equals("append", StringComparison.OrdinalIgnoreCase))
                     {
                         append = true;
                         if (i + 1 < args.Length)
@@ -390,109 +381,82 @@ namespace WebOverlay
                     }
                 }
 
-                Log($"URL аргумент: {url}, append: {append}");
-
                 if (!createdNew)
                 {
-                    Log("Другой экземпляр уже запущен");
                     if (!string.IsNullOrEmpty(url))
                     {
-                        string command = append ? "append" : "replace";
-                        bool sent = SendCommandToExistingInstance($"{command}|{url}");
-                        if (!sent)
-                        {
-                            Log("Не удалось отправить команду существующему экземпляру. Завершаем.");
-                            return;
-                        }
-                        else
-                        {
-                            Log("Команда успешно отправлена, завершаем");
-                            return;
-                        }
+                        SendCommandToExistingInstance((append ? "append" : "replace") + "|" + url);
                     }
-                    else
-                    {
-                        Log("URL не указан, завершаем");
-                        return;
-                    }
+                    return;
                 }
 
                 _appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay");
                 _localesDir = Path.Combine(_appDataDir, "locales");
-                Log($"AppDataDir: {_appDataDir}");
-                Log($"LocalesDir: {_localesDir}");
+                Directory.CreateDirectory(_appDataDir);
+                Directory.CreateDirectory(_localesDir);
 
                 string configPath = Path.Combine(_appDataDir, "config.json");
-
-                bool configReady = false;
-                while (!configReady)
+                _config = LoadConfig(configPath);
+                if (_config == null)
                 {
-                    Log("Цикл: загрузка конфига");
-                    _config = LoadConfig(configPath);
-                    if (_config == null)
-                    {
-                        Log("Конфиг не найден, показываем выбор языка");
-                        ShowLanguageSelection();
-                        return;
-                    }
-                    else
-                    {
-                        Log($"Конфиг загружен, язык: {_config.Language}, Clickable: {_config.Clickable}");
-                        if (string.IsNullOrEmpty(_config.Language) || !File.Exists(Path.Combine(_localesDir, _config.Language + ".txt")))
-                        {
-                            Log("Язык пуст или файл локали отсутствует, показываем выбор языка");
-                            ShowLanguageSelection();
-                            return;
-                        }
-                        else
-                        {
-                            Log("Язык корректен, выходим из цикла");
-                            configReady = true;
-                        }
-                    }
+                    ShowLanguageSelection();
+                    return;
                 }
 
-                Log("Загружаем локализацию");
+                if (string.IsNullOrEmpty(_config.Language) || !File.Exists(Path.Combine(_localesDir, _config.Language + ".txt")))
+                {
+                    ShowLanguageSelection();
+                    return;
+                }
+
                 Localization.Load(_config.Language, _localesDir);
-                Log($"Локализация загружена: {Localization.CurrentLanguage}");
 
                 if (string.IsNullOrEmpty(url))
-                {
-                    Log("URL не задан, создаём справочную страницу");
                     url = CreateHelpPage();
-                    Log($"Справочная страница: {url}");
-                }
 
                 var firstWindow = WindowManager.CreateWindow(url, _config, _appDataDir, true);
                 _firstWindow = firstWindow;
-                Log($"Создано первое окно с URL: {url}");
 
-                bool registeredLock = RegisterHotKey(firstWindow.Handle, HOTKEY_TOGGLE_LOCK, MOD_CONTROL | MOD_SHIFT | MOD_ALT, (int)Keys.O);
-                bool registeredHide = RegisterHotKey(firstWindow.Handle, HOTKEY_TOGGLE_HIDE, MOD_CONTROL | MOD_SHIFT | MOD_ALT, (int)Keys.P);
-                bool registeredPgUp = RegisterHotKey(firstWindow.Handle, HOTKEY_PGUP, MOD_CONTROL | MOD_SHIFT | MOD_ALT, (int)Keys.PageUp);
-                bool registeredPgDn = RegisterHotKey(firstWindow.Handle, HOTKEY_PGDN, MOD_CONTROL | MOD_SHIFT | MOD_ALT, (int)Keys.PageDown);
-                Log($"Регистрация хоткеев: Lock={registeredLock}, Hide={registeredHide}, PgUp={registeredPgUp}, PgDn={registeredPgDn}");
-                if (!registeredLock || !registeredHide || !registeredPgUp || !registeredPgDn)
-                    MessageBox.Show(Localization.Get("HotkeyRegistrationError", "Failed to register global hotkeys."),
-                                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_TOGGLE_LOCK, _config.ToggleLock);
+                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_TOGGLE_HIDE, _config.ToggleHide);
+                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_PGUP, "Ctrl+Shift+Alt+PageUp");
+                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_PGDN, "Ctrl+Shift+Alt+PageDown");
+                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_TOGGLE_CLICKABLE, _config.ToggleClickable);
+                RegisterConfiguredHotKey(firstWindow.Handle, HOTKEY_MOVE_MONITOR, _config.MoveMonitor);
 
-                var thread = new Thread(StartPipeServer);
-                thread.IsBackground = true;
+                var thread = new Thread(StartPipeServer) { IsBackground = true };
                 thread.Start();
 
-                Log("Запускаем Application.Run с главным окном");
                 Application.Run(firstWindow);
-                Log("Application.Run завершён");
-
-                _mutex?.ReleaseMutex();
-                _mutex?.Dispose();
-                Log("Приложение завершено корректно");
             }
             catch (Exception ex)
             {
                 Log($"КРИТИЧЕСКАЯ ОШИБКА: {ex.Message}\n{ex.StackTrace}");
                 MessageBox.Show($"Ошибка: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                throw;
+            }
+            finally
+            {
+                try { _mutex?.ReleaseMutex(); } catch { }
+                try { _mutex?.Dispose(); } catch { }
+            }
+        }
+
+        private static bool RegisterConfiguredHotKey(IntPtr handle, int id, string binding)
+        {
+            try
+            {
+                var kb = KeyBinding.Parse(binding);
+                if (!kb.TryGetNative(out int modifiers, out int vk))
+                    return false;
+
+                bool ok = RegisterHotKey(handle, id, modifiers, vk);
+                Log($"Hotkey id={id} binding={binding} registered={ok}");
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                Log($"Hotkey registration failed id={id}: {ex.Message}");
+                return false;
             }
         }
 
@@ -515,6 +479,12 @@ namespace WebOverlay
                 case HOTKEY_PGDN:
                     WindowManager.NextWindow();
                     break;
+                case HOTKEY_TOGGLE_CLICKABLE:
+                    WindowManager.ToggleClickableActive();
+                    break;
+                case HOTKEY_MOVE_MONITOR:
+                    WindowManager.MoveActiveToNextMonitor();
+                    break;
             }
         }
 
@@ -530,85 +500,48 @@ namespace WebOverlay
                         server.WaitForConnection();
                         using var reader = new StreamReader(server);
                         string line = reader.ReadLine();
-                        if (!string.IsNullOrEmpty(line))
+                        if (string.IsNullOrEmpty(line))
+                            continue;
+
+                        string[] parts = line.Split('|');
+                        if (parts.Length != 2 || _firstWindow == null || _firstWindow.IsDisposed)
+                            continue;
+
+                        string command = parts[0];
+                        string pipeUrl = parts[1];
+                        _firstWindow.Invoke(new Action(() =>
                         {
-                            Log($"Получена команда через канал: {line}");
-                            string[] parts = line.Split('|');
-                            if (parts.Length == 2)
+                            try
                             {
-                                string command = parts[0];
-                                string url = parts[1];
-                                if (_firstWindow != null && !_firstWindow.IsDisposed)
+                                if (command == "append")
                                 {
-                                    _firstWindow.Invoke(new Action(() =>
-                                    {
-                                        try
-                                        {
-                                            if (command == "append")
-                                            {
-                                                var newWindow = WindowManager.CreateWindow(url, _config, _appDataDir, false);
-                                                Log($"Создано новое окно с URL: {url} (не активное)");
-                                            }
-                                            else if (command == "replace")
-                                            {
-                                                var active = WindowManager.ActiveWindow;
-                                                if (active != null)
-                                                {
-                                                    active.NavigateToUrl(url);
-                                                    Log($"Активное окно перезагружено на URL: {url}");
-                                                }
-                                                else
-                                                {
-                                                    var newWindow = WindowManager.CreateWindow(url, _config, _appDataDir, true);
-                                                    Log($"Создано новое окно с URL: {url} (так как не было активного)");
-                                                }
-                                            }
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Log($"Ошибка при выполнении команды: {ex.Message}");
-                                        }
-                                    }));
+                                    WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
                                 }
-                                else
+                                else if (command == "replace")
                                 {
-                                    Log("Нет активного окна для Invoke, создаём новое окно в текущем потоке (может вызвать ошибку)");
-                                    if (command == "append")
-                                    {
-                                        var newWindow = WindowManager.CreateWindow(url, _config, _appDataDir, false);
-                                        Log($"Создано новое окно с URL: {url} (без Invoke, не активное)");
-                                    }
-                                    else if (command == "replace")
-                                    {
-                                        var active = WindowManager.ActiveWindow;
-                                        if (active != null)
-                                        {
-                                            active.NavigateToUrl(url);
-                                            Log($"Активное окно перезагружено на URL: {url} (без Invoke)");
-                                        }
-                                        else
-                                        {
-                                            var newWindow = WindowManager.CreateWindow(url, _config, _appDataDir, true);
-                                            Log($"Создано новое окно с URL: {url} (без Invoke)");
-                                        }
-                                    }
+                                    var active = WindowManager.ActiveWindow;
+                                    if (active != null)
+                                        active.NavigateToUrl(pipeUrl);
+                                    else
+                                        WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, true);
                                 }
                             }
-                        }
-                        // Закрываем сервер, чтобы освободить канал для следующего клиента
-                        server.Disconnect();
+                            catch (Exception ex)
+                            {
+                                Log($"Ошибка команды pipe: {ex.Message}");
+                            }
+                        }));
                     }
                     catch (Exception ex)
                     {
-                        Log($"Ошибка в обработке соединения: {ex.Message}");
-                        // Небольшая задержка перед повторной попыткой
+                        Log($"Ошибка pipe connection: {ex.Message}");
                         Thread.Sleep(50);
                     }
                 }
             }
             catch (Exception ex)
             {
-                Log($"Ошибка в сервере канала (внешний цикл): {ex.Message}");
+                Log($"Ошибка pipe server: {ex.Message}");
             }
         }
 
@@ -617,13 +550,10 @@ namespace WebOverlay
             try
             {
                 using var pipe = new System.IO.Pipes.NamedPipeClientStream(".", PipeName, System.IO.Pipes.PipeDirection.Out);
-                pipe.Connect(3000); // увеличен таймаут
+                pipe.Connect(3000);
                 using var writer = new StreamWriter(pipe);
                 writer.WriteLine(command);
                 writer.Flush();
-                // Ждём, пока сервер прочитает данные (небольшая задержка)
-                Thread.Sleep(50);
-                Log($"Команда отправлена существующему экземпляру: {command}");
                 return true;
             }
             catch (Exception ex)
@@ -633,13 +563,28 @@ namespace WebOverlay
             }
         }
 
+        public static void Log(string msg)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_logPath))
+                {
+                    string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                    _logPath = Path.Combine(appData, "WebOverlay", "debug.log");
+                    Directory.CreateDirectory(Path.GetDirectoryName(_logPath));
+                }
+                File.AppendAllText(_logPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - {msg}{Environment.NewLine}");
+            }
+            catch { }
+        }
+
         public static AppConfig LoadConfig(string path)
         {
             try
             {
-                if (!File.Exists(path)) return null;
-                string json = File.ReadAllText(path);
-                return JsonSerializer.Deserialize<AppConfig>(json);
+                if (!File.Exists(path))
+                    return null;
+                return JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(path));
             }
             catch (Exception ex)
             {
@@ -654,7 +599,6 @@ namespace WebOverlay
             {
                 string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(path, json);
-                Log($"Config сохранён в {path}");
             }
             catch (Exception ex)
             {
@@ -664,27 +608,23 @@ namespace WebOverlay
 
         private static void EnsureLocales()
         {
-            Log("EnsureLocales: создание файлов локалей");
             Directory.CreateDirectory(_appDataDir);
             Directory.CreateDirectory(_localesDir);
-
             foreach (var pair in LocaleData.Locales)
             {
                 string filePath = Path.Combine(_localesDir, pair.Key + ".txt");
                 if (!File.Exists(filePath))
                     File.WriteAllText(filePath, pair.Value, Encoding.UTF8);
             }
-            Log("EnsureLocales: все файлы созданы");
         }
 
         private static void ShowLanguageSelection()
         {
-            Log("ShowLanguageSelection: начало");
             EnsureLocales();
 
             var form = new Form
             {
-                Text = Localization.Get("SelectLanguageTitle"),
+                Text = Localization.Get("SelectLanguageTitle", "Select language"),
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 StartPosition = FormStartPosition.CenterScreen,
                 AutoSize = true,
@@ -695,35 +635,16 @@ namespace WebOverlay
                 TopMost = true
             };
 
-            form.Shown += (s, e) =>
-            {
-                Log("Диалог выбора языка: событие Shown, принудительно поднимаем окно");
-                SetWindowPos(form.Handle, new IntPtr(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-                SetForegroundWindow(form.Handle);
-                BringWindowToTop(form.Handle);
-                ShowWindow(form.Handle, SW_SHOW);
-                var timer = new System.Windows.Forms.Timer { Interval = 50 };
-                timer.Tick += (s2, e2) =>
-                {
-                    SetWindowPos(form.Handle, new IntPtr(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-                    SetForegroundWindow(form.Handle);
-                    BringWindowToTop(form.Handle);
-                    ShowWindow(form.Handle, SW_SHOW);
-                    timer.Stop();
-                    timer.Dispose();
-                };
-                timer.Start();
-            };
-
             var flow = new FlowLayoutPanel
             {
                 FlowDirection = FlowDirection.TopDown,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink
             };
+
             flow.Controls.Add(new Label
             {
-                Text = Localization.Get("SelectLanguageInstruction"),
+                Text = Localization.Get("SelectLanguageInstruction", "Select language"),
                 AutoSize = true,
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Margin = new Padding(0, 0, 0, 10)
@@ -734,31 +655,26 @@ namespace WebOverlay
             for (int i = 0; i < languages.Length; i++)
             {
                 string lang = languages[i];
-                string label = labels[i];
                 var btn = new Button
                 {
-                    Text = label,
+                    Text = labels[i],
                     Tag = lang,
                     AutoSize = true,
                     Padding = new Padding(10, 5, 10, 5),
-                    Margin = new Padding(0, 3, 0, 3),
-                    FlatStyle = FlatStyle.System
+                    Margin = new Padding(0, 3, 0, 3)
                 };
+
                 btn.Click += (s, e) =>
                 {
                     string selectedLang = (string)((Button)s).Tag;
-                    Log($"Выбран язык: {selectedLang}");
                     _config = new AppConfig { Language = selectedLang, Clickable = true };
                     SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
-                    form.DialogResult = DialogResult.OK;
-                    form.Close();
-                    Log("Форма выбора языка закрыта");
 
                     string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? Environment.ProcessPath;
                     if (!string.IsNullOrEmpty(exePath))
                     {
-                        Log($"Перезапуск: {exePath}");
                         Process.Start(exePath, Environment.GetCommandLineArgs().Skip(1).ToArray());
+                        form.Close();
                         Environment.Exit(0);
                     }
                 };
@@ -766,55 +682,25 @@ namespace WebOverlay
             }
 
             string configPath = Path.Combine(_appDataDir, "config.json");
-            var linkLabel = new LinkLabel
+            flow.Controls.Add(new Label
             {
-                Text = Localization.Get("ConfigFileLabel") + " " + configPath,
+                Text = Localization.Get("ConfigFileLabel", "Config") + " " + configPath,
                 AutoSize = true,
                 Font = new Font("Segoe UI", 8, FontStyle.Italic),
                 ForeColor = Color.Gray,
-                Margin = new Padding(0, 15, 0, 0),
-                LinkColor = Color.LightBlue,
-                ActiveLinkColor = Color.White
-            };
-            linkLabel.LinkClicked += (s, e) =>
-            {
-                try
-                {
-                    if (File.Exists(configPath))
-                    {
-                        Process.Start("notepad.exe", configPath);
-                    }
-                    else
-                    {
-                        string folder = Path.GetDirectoryName(configPath);
-                        if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder))
-                            Process.Start("explorer.exe", folder);
-                        else
-                            MessageBox.Show("Папка для конфига не найдена.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Не удалось открыть: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            };
-            flow.Controls.Add(linkLabel);
+                Margin = new Padding(0, 15, 0, 0)
+            });
 
             form.Controls.Add(flow);
-            Log("Показываем диалог выбора языка (поверх всех окон)");
             form.ShowDialog();
-            Log("Диалог выбора языка завершён");
         }
 
         private static string CreateHelpPage()
         {
-            Log("CreateHelpPage: создание справки");
             string tempDir = Path.Combine(Path.GetTempPath(), "WebOverlay");
             Directory.CreateDirectory(tempDir);
             string htmlPath = Path.Combine(tempDir, "help.html");
-            string html = HelpPage.GetHelpHtml(_config);
-            File.WriteAllText(htmlPath, html, Encoding.UTF8);
-            Log($"Справка создана: {htmlPath}");
+            File.WriteAllText(htmlPath, HelpPage.GetHelpHtml(_config), Encoding.UTF8);
             return "file:///" + htmlPath.Replace('\\', '/');
         }
     }
@@ -822,38 +708,44 @@ namespace WebOverlay
     public class OverlayForm : Form
     {
         private WebView2 webView;
-        private readonly string url;
+        private string url;
         private readonly string configDir;
         private bool _isLocked = true;
         private double _zoomFactor = 1.0;
-        private bool _disposed;
         private readonly AppConfig _config;
         private readonly string _appDataDir;
         private bool _clickable;
-        private bool _showYellow = false;
-        private bool _showBlue = false;
+        private bool _showYellow;
+        private bool _showBlue;
         private bool _contentVisible = true;
+        private bool _manipulationMode;
+        private bool _visibilityBeforeManipulation = true;
+        private WindowInfoForm _infoForm;
 
         public bool IsLocked => _isLocked;
         public string Url => url;
         public bool IsContentVisible => _contentVisible;
 
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_LAYERED = 0x00080000;
+        private const int SWP_NOMOVE = 0x0002;
+        private const int SWP_NOSIZE = 0x0001;
+        private const int SWP_FRAMECHANGED = 0x0020;
+        private const int WM_NCHITTEST = 0x0084;
+        private const int HTTRANSPARENT = -1;
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, int uFlags);
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-        private void Log(string msg)
-        {
-            try
-            {
-                string logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay", "debug.log");
-                File.AppendAllText(logPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - OverlayForm: {msg}{Environment.NewLine}");
-            }
-            catch { }
-        }
-
         public OverlayForm(string url, AppConfig config, string appDataDir)
         {
-            Log("OverlayForm: конструктор начало");
             this.url = url;
             _config = config;
             _appDataDir = appDataDir;
@@ -865,84 +757,27 @@ namespace WebOverlay
             InitializeForm();
             InitializeWebView();
             LoadState();
-            SetClickThrough(!_clickable);
-            this.Enabled = _clickable;
+            ApplyClickability();
 
-            this.Shown += (s, e) =>
+            Shown += (s, e) =>
             {
-                Log("OverlayForm: событие Shown");
-                this.TopMost = true;
+                TopMost = true;
                 SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-                this.Activate();
-                this.Focus();
-                Log("OverlayForm: событие Shown завершено");
+                UpdateManipulationInfo();
             };
 
-            WindowManager.AddWindow(this);
-            Log("OverlayForm: конструктор завершён");
+            LocationChanged += (s, e) => UpdateManipulationInfo();
+            SizeChanged += (s, e) => UpdateManipulationInfo();
         }
 
-        public void SetLockState(bool locked)
+        private void Log(string msg)
         {
-            if (_isLocked != locked)
-                ToggleLockInternal(locked);
-        }
-
-        private void ToggleLockInternal(bool locked)
-        {
-            _isLocked = locked;
-            Log($"ToggleLockInternal: {(_isLocked ? "заблокировано" : "разблокировано")}");
-            if (!_isLocked)
+            try
             {
-                this.Activate();
-                this.Focus();
+                string logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay", "debug.log");
+                File.AppendAllText(logPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - OverlayForm: {msg}{Environment.NewLine}");
             }
-        }
-
-        public void SetContentVisible(bool visible)
-        {
-            if (_contentVisible != visible)
-            {
-                _contentVisible = visible;
-                if (webView != null)
-                    webView.Visible = visible;
-                Log($"SetContentVisible: {visible}");
-            }
-        }
-
-        public void ToggleContentVisibility()
-        {
-            SetContentVisible(!_contentVisible);
-        }
-
-        public void UpdateSelectionBorder(bool showYellow, bool showBlue)
-        {
-            if (_showYellow != showYellow || _showBlue != showBlue)
-            {
-                _showYellow = showYellow;
-                _showBlue = showBlue;
-                this.Invalidate();
-                Log($"UpdateSelectionBorder: Y={showYellow}, B={showBlue}");
-            }
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            if (_showYellow)
-            {
-                using (Pen pen = new Pen(Color.Yellow, 4))
-                {
-                    e.Graphics.DrawRectangle(pen, 2, 2, this.ClientSize.Width - 4, this.ClientSize.Height - 4);
-                }
-            }
-            else if (_showBlue)
-            {
-                using (Pen pen = new Pen(Color.DodgerBlue, 2))
-                {
-                    e.Graphics.DrawRectangle(pen, 2, 2, this.ClientSize.Width - 4, this.ClientSize.Height - 4);
-                }
-            }
+            catch { }
         }
 
         private void InitializeForm()
@@ -960,15 +795,14 @@ namespace WebOverlay
 
         private async void InitializeWebView()
         {
-            Log("InitializeWebView: начало");
             webView = new WebView2
             {
                 Dock = DockStyle.Fill,
                 DefaultBackgroundColor = Color.Transparent,
                 Visible = true
             };
-            Controls.Add(webView);
 
+            Controls.Add(webView);
             webView.KeyDown += (s, e) => OnKeyDown(s, e);
             webView.PreviewKeyDown += (s, e) =>
             {
@@ -978,29 +812,33 @@ namespace WebOverlay
 
             try
             {
-                Log("InitializeWebView: EnsureCoreWebView2Async");
                 await webView.EnsureCoreWebView2Async(null);
-                Log("InitializeWebView: CoreWebView2 создан");
+                webView.CoreWebView2.NavigationCompleted += (s, e) =>
+                {
+                    try
+                    {
+                        LoadState();
+                        webView.ZoomFactor = _zoomFactor;
+                        webView.Visible = _manipulationMode || _contentVisible;
+                        webView.BringToFront();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"NavigationCompleted error: {ex.Message}");
+                    }
+                };
 
                 webView.CoreWebView2.WebMessageReceived += (s, e) =>
                 {
-                    string msg = e.TryGetWebMessageAsString();
-                    if (msg == "toggle")
-                        WindowManager.ToggleLockMode();
+                    try
+                    {
+                        if (e.TryGetWebMessageAsString() == "toggle")
+                            WindowManager.ToggleLockMode();
+                    }
+                    catch { }
                 };
-                webView.CoreWebView2.NavigationCompleted += (s, e) =>
-                {
-                    Log($"NavigationCompleted: {e.IsSuccess}");
-                    LoadState();
-                    if (webView != null)
-                        webView.ZoomFactor = _zoomFactor;
-                    webView.Visible = _contentVisible;
-                    webView.BringToFront();
-                };
-                Log($"InitializeWebView: навигация к {url}");
+
                 webView.CoreWebView2.Navigate(url);
-                webView.Visible = _contentVisible;
-                webView.BringToFront();
             }
             catch (Exception ex)
             {
@@ -1012,18 +850,197 @@ namespace WebOverlay
 
         public void NavigateToUrl(string newUrl)
         {
-            Log($"NavigateToUrl: {newUrl}");
+            SaveState();
+            url = newUrl;
             if (webView?.CoreWebView2 != null)
-            {
-                SaveState();
-                var field = typeof(OverlayForm).GetField("url", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                field?.SetValue(this, newUrl);
                 webView.CoreWebView2.Navigate(newUrl);
+            UpdateManipulationInfo();
+        }
+
+        public void SetLockState(bool locked)
+        {
+            _isLocked = locked;
+            if (!locked)
+            {
+                BringToFront();
+                Activate();
+            }
+        }
+
+        public void SetManipulationMode(bool enabled)
+        {
+            if (_manipulationMode == enabled)
+            {
+                UpdateManipulationInfo();
+                return;
+            }
+
+            _manipulationMode = enabled;
+            if (enabled)
+            {
+                _visibilityBeforeManipulation = _contentVisible;
+                if (webView != null)
+                    webView.Visible = true;
+                if (!IsHandleCreated)
+                    CreateHandle();
+                Show();
+                BringToFront();
+                _infoForm ??= new WindowInfoForm();
+                _infoForm.Show();
+                UpdateManipulationInfo();
             }
             else
             {
-                Log("NavigateToUrl: webView или CoreWebView2 == null");
+                if (webView != null)
+                    webView.Visible = _visibilityBeforeManipulation;
+                if (_infoForm != null)
+                {
+                    _infoForm.Hide();
+                    _infoForm.Dispose();
+                    _infoForm = null;
+                }
+                UpdateManipulationInfo();
             }
+        }
+
+        public void SetContentVisible(bool visible)
+        {
+            _contentVisible = visible;
+            if (!_manipulationMode && webView != null)
+                webView.Visible = visible;
+        }
+
+        public void ToggleContentVisibility()
+        {
+            SetContentVisible(!_contentVisible);
+        }
+
+        public void UpdateSelectionBorder(bool showYellow, bool showBlue)
+        {
+            if (_showYellow == showYellow && _showBlue == showBlue)
+                return;
+
+            _showYellow = showYellow;
+            _showBlue = showBlue;
+            Invalidate();
+            UpdateManipulationInfo();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (_showYellow)
+            {
+                using var pen = new Pen(Color.Yellow, 4);
+                e.Graphics.DrawRectangle(pen, 2, 2, Math.Max(0, ClientSize.Width - 4), Math.Max(0, ClientSize.Height - 4));
+            }
+            else if (_showBlue)
+            {
+                using var pen = new Pen(Color.DodgerBlue, 2);
+                e.Graphics.DrawRectangle(pen, 2, 2, Math.Max(0, ClientSize.Width - 4), Math.Max(0, ClientSize.Height - 4));
+            }
+        }
+
+        public void ToggleClickable()
+        {
+            _clickable = !_clickable;
+            _config.Clickable = _clickable;
+            Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
+            ApplyClickability();
+            UpdateManipulationInfo();
+            Log($"ToggleClickable: {_clickable}");
+            System.Media.SystemSounds.Beep.Play();
+        }
+
+        private void ApplyClickability()
+        {
+            Enabled = true;
+            SetClickThrough(!_clickable);
+        }
+
+        private void SetClickThrough(bool enable)
+        {
+            if (!IsHandleCreated)
+                return;
+
+            int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);
+            if (enable)
+                exStyle |= WS_EX_TRANSPARENT | WS_EX_LAYERED;
+            else
+                exStyle &= ~(WS_EX_TRANSPARENT | WS_EX_LAYERED);
+
+            SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
+            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+            Log($"SetClickThrough: {enable}");
+        }
+
+        public void MoveToNextMonitor()
+        {
+            var screens = Screen.AllScreens
+                .OrderBy(s => s.Bounds.Left)
+                .ThenBy(s => s.Bounds.Top)
+                .ThenBy(s => s.DeviceName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (screens.Length <= 1)
+                return;
+
+            Screen current = Screen.FromHandle(Handle);
+            int currentIndex = Array.FindIndex(screens, s => string.Equals(s.DeviceName, current.DeviceName, StringComparison.OrdinalIgnoreCase));
+            if (currentIndex < 0)
+                currentIndex = 0;
+
+            Screen target = screens[(currentIndex + 1) % screens.Length];
+            Rectangle currentArea = current.WorkingArea;
+            Rectangle targetArea = target.WorkingArea;
+
+            int relativeX = Location.X - currentArea.Left;
+            int relativeY = Location.Y - currentArea.Top;
+            int maxX = Math.Max(targetArea.Left, targetArea.Right - Width);
+            int maxY = Math.Max(targetArea.Top, targetArea.Bottom - Height);
+            int newX = Math.Clamp(targetArea.Left + relativeX, targetArea.Left, maxX);
+            int newY = Math.Clamp(targetArea.Top + relativeY, targetArea.Top, maxY);
+
+            Location = new Point(newX, newY);
+            SaveState();
+            UpdateManipulationInfo();
+            Log($"MoveToNextMonitor: {current.DeviceName} -> {target.DeviceName}, location={Location.X},{Location.Y}");
+        }
+
+        public void UpdateManipulationInfo()
+        {
+            if (!_manipulationMode || _infoForm == null || _infoForm.IsDisposed)
+                return;
+
+            Screen screen;
+            try { screen = Screen.FromHandle(Handle); }
+            catch { screen = Screen.PrimaryScreen; }
+
+            int monitorIndex = Array.FindIndex(Screen.AllScreens, s => s.DeviceName == screen.DeviceName) + 1;
+            if (monitorIndex <= 0)
+                monitorIndex = 1;
+
+            string title = GetContentName();
+            string text = $"{title} | {Width}x{Height} | zoom {_zoomFactor * 100:0}% | X:{Left} Y:{Top} | bounds {Left},{Top}-{Right},{Bottom} | monitor {monitorIndex}/{Screen.AllScreens.Length} | click {( _clickable ? "ON" : "OFF" )}";
+            _infoForm.UpdateFor(this, text);
+        }
+
+        private string GetContentName()
+        {
+            try
+            {
+                if (url.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+                {
+                    var localPath = new Uri(url).LocalPath;
+                    return Path.GetFileName(localPath);
+                }
+
+                if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                    return string.IsNullOrEmpty(uri.Host) ? url : uri.Host + uri.AbsolutePath;
+            }
+            catch { }
+
+            return url ?? "WebOverlay";
         }
 
         private void OnKeyDown(object sender, KeyEventArgs e)
@@ -1037,24 +1054,20 @@ namespace WebOverlay
             }
 
             if (WindowManager.ActiveWindow != this || WindowManager.IsLockMode || _isLocked)
-            {
-                e.Handled = false;
                 return;
-            }
 
             if (CheckBinding(_config.MoveLeft, e, () => { Location = new Point(Location.X - 5, Location.Y); SaveState(); })) return;
             if (CheckBinding(_config.MoveRight, e, () => { Location = new Point(Location.X + 5, Location.Y); SaveState(); })) return;
             if (CheckBinding(_config.MoveUp, e, () => { Location = new Point(Location.X, Location.Y - 5); SaveState(); })) return;
             if (CheckBinding(_config.MoveDown, e, () => { Location = new Point(Location.X, Location.Y + 5); SaveState(); })) return;
-            if (CheckBinding(_config.ZoomIn, e, () => { _zoomFactor = Math.Min(3.0, _zoomFactor + 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); })) return;
-            if (CheckBinding(_config.ZoomOut, e, () => { _zoomFactor = Math.Max(0.3, _zoomFactor - 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); })) return;
+            if (CheckBinding(_config.ZoomIn, e, () => { _zoomFactor = Math.Min(3.0, _zoomFactor + 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); UpdateManipulationInfo(); })) return;
+            if (CheckBinding(_config.ZoomOut, e, () => { _zoomFactor = Math.Max(0.3, _zoomFactor - 0.1); if (webView != null) webView.ZoomFactor = _zoomFactor; SaveState(); UpdateManipulationInfo(); })) return;
             if (CheckBinding(_config.ToggleClickable, e, ToggleClickable)) return;
+            if (CheckBinding(_config.MoveMonitor, e, MoveToNextMonitor)) return;
             if (CheckBinding(_config.ResizeWidthDecrease, e, () => { Size = new Size(Math.Max(100, Width - _config.ResizeStep), Height); SaveState(); })) return;
             if (CheckBinding(_config.ResizeWidthIncrease, e, () => { Size = new Size(Width + _config.ResizeStep, Height); SaveState(); })) return;
             if (CheckBinding(_config.ResizeHeightDecrease, e, () => { Size = new Size(Width, Math.Max(100, Height - _config.ResizeStep)); SaveState(); })) return;
             if (CheckBinding(_config.ResizeHeightIncrease, e, () => { Size = new Size(Width, Height + _config.ResizeStep); SaveState(); })) return;
-
-            e.Handled = false;
         }
 
         private bool CheckBinding(string binding, KeyEventArgs e, Action action)
@@ -1066,6 +1079,7 @@ namespace WebOverlay
                 {
                     action();
                     e.Handled = true;
+                    e.SuppressKeyPress = true;
                     return true;
                 }
             }
@@ -1073,79 +1087,57 @@ namespace WebOverlay
             return false;
         }
 
-        private void ToggleClickable()
-        {
-            _clickable = !_clickable;
-            this.Enabled = _clickable;
-            _config.Clickable = _clickable;
-            Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
-            SetClickThrough(!_clickable);
-
-            if (_clickable)
-            {
-                System.Media.SystemSounds.Beep.Play();
-                System.Threading.Thread.Sleep(150);
-                System.Media.SystemSounds.Beep.Play();
-            }
-            else
-            {
-                System.Media.SystemSounds.Beep.Play();
-            }
-        }
-
-        private void SetClickThrough(bool enable)
-        {
-            int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);
-            if (enable) exStyle |= WS_EX_TRANSPARENT;
-            else exStyle &= ~WS_EX_TRANSPARENT;
-            SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
-            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
-            Log($"SetClickThrough: {enable} (WS_EX_TRANSPARENT = {(exStyle & WS_EX_TRANSPARENT) != 0})");
-        }
-
-        [DllImport("user32.dll")]
-        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-        [DllImport("user32.dll")]
-        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-        [DllImport("user32.dll")]
-        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, int uFlags);
-
-        private const int GWL_EXSTYLE = -20;
-        private const int WS_EX_TRANSPARENT = 0x00000020;
-        private const int SWP_NOMOVE = 0x0002;
-        private const int SWP_NOSIZE = 0x0001;
-        private const int SWP_FRAMECHANGED = 0x0020;
-
         private string GetStateFilePath()
         {
-            string safe = string.Join("_", url.Split(Path.GetInvalidFileNameChars()));
-            if (safe.Length > 200) safe = safe[..200];
-            string path = Path.Combine(configDir, safe + ".txt");
-            Log($"GetStateFilePath: {path}");
-            return path;
+            string safe = string.Join("_", (url ?? "WebOverlay").Split(Path.GetInvalidFileNameChars()));
+            if (safe.Length > 200)
+                safe = safe[..200];
+            return Path.Combine(configDir, safe + ".txt");
+        }
+
+        private static Screen GetDefaultEts2Screen()
+        {
+            try
+            {
+                var processes = Process.GetProcessesByName("eurotrucks2");
+                foreach (var process in processes)
+                {
+                    try
+                    {
+                        if (process.MainWindowHandle != IntPtr.Zero)
+                            return Screen.FromHandle(process.MainWindowHandle);
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }
+            }
+            catch { }
+
+            return Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
         }
 
         private void LoadState()
         {
             string path = GetStateFilePath();
-            Log($"LoadState: путь = {path}, файл существует = {File.Exists(path)}");
             if (!File.Exists(path))
             {
-                if (url.Contains("help.html"))
+                var screen = GetDefaultEts2Screen();
+                if (screen != null)
                 {
-                    Location = new Point(560, 15);
-                    Size = new Size(800, 1000);
-                    _zoomFactor = 1.0;
-                    Log("LoadState: установлены значения для справки");
+                    var area = screen.WorkingArea;
+                    Location = new Point(area.Left + Math.Max(0, (area.Width - Width) / 2), area.Top + Math.Max(0, (area.Height - Height) / 2));
                 }
-                else
+
+                if (url.Contains("help.html", StringComparison.OrdinalIgnoreCase))
                 {
-                    var screen = Screen.PrimaryScreen.WorkingArea;
-                    Location = new Point((screen.Width - Width) / 2, (screen.Height - Height) / 2);
-                    Log("LoadState: центрируем окно");
+                    Location = new Point(screen?.WorkingArea.Left + 560 ?? 560, screen?.WorkingArea.Top + 15 ?? 15);
+                    Size = new Size(800, 1000);
                 }
                 return;
             }
+
             try
             {
                 string[] lines = File.ReadAllLines(path);
@@ -1153,63 +1145,153 @@ namespace WebOverlay
                 {
                     int x = int.Parse(lines[0]);
                     int y = int.Parse(lines[1]);
-                    double zoom = double.Parse(lines[2]);
+                    double zoom = double.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture);
                     int w = int.Parse(lines[3]);
                     int h = int.Parse(lines[4]);
                     Location = new Point(x, y);
                     _zoomFactor = zoom;
                     Size = new Size(w, h);
-                    Log($"LoadState: загружено {x},{y},{zoom},{w},{h}");
                 }
             }
-            catch (Exception ex) { Log($"LoadState ошибка: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Log($"LoadState ошибка: {ex.Message}");
+            }
         }
 
         private void SaveState()
         {
             try
             {
-                string path = GetStateFilePath();
-                Log($"SaveState: сохранение в {path}");
-                File.WriteAllLines(path, new[]
+                File.WriteAllLines(GetStateFilePath(), new[]
                 {
                     Location.X.ToString(),
                     Location.Y.ToString(),
-                    _zoomFactor.ToString(),
+                    _zoomFactor.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     Width.ToString(),
                     Height.ToString()
                 });
-                Log("SaveState: успешно сохранено");
             }
-            catch (Exception ex) { Log($"SaveState ошибка: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Log($"SaveState ошибка: {ex.Message}");
+            }
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_HOTKEY)
+            if (m.Msg == WM_NCHITTEST && !_clickable)
             {
-                int id = m.WParam.ToInt32();
-                Program.ProcessHotkey(id);
+                m.Result = new IntPtr(HTTRANSPARENT);
                 return;
             }
+
+            if (m.Msg == 0x0312)
+            {
+                Program.ProcessHotkey(m.WParam.ToInt32());
+                return;
+            }
+
             base.WndProc(ref m);
         }
 
-        private const int WM_HOTKEY = 0x0312;
-
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            Log("OnFormClosing: сохранение состояния");
+            SaveState();
             _config.Clickable = _clickable;
             Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
-            SaveState();
-            UnregisterHotKey(Handle, 1);
-            UnregisterHotKey(Handle, 2);
-            UnregisterHotKey(Handle, 3);
-            UnregisterHotKey(Handle, 4);
+
+            for (int id = 1; id <= 6; id++)
+            {
+                try { UnregisterHotKey(Handle, id); } catch { }
+            }
+
+            if (_infoForm != null)
+            {
+                try { _infoForm.Close(); } catch { }
+                _infoForm = null;
+            }
+
             WindowManager.RemoveWindow(this);
-            _disposed = true;
             base.OnFormClosing(e);
+        }
+    }
+
+    public class WindowInfoForm : Form
+    {
+        private readonly Label _label;
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const int WM_NCHITTEST = 0x0084;
+        private const int HTTRANSPARENT = -1;
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        public WindowInfoForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            TopMost = true;
+            BackColor = Color.FromArgb(35, 35, 35);
+            ForeColor = Color.White;
+            Padding = new Padding(4, 1, 4, 1);
+            Height = 18;
+
+            _label = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                AutoEllipsis = true
+            };
+            Controls.Add(_label);
+        }
+
+        protected override bool ShowWithoutActivation => true;
+
+        public void UpdateFor(OverlayForm owner, string text)
+        {
+            if (owner == null || owner.IsDisposed)
+                return;
+
+            _label.Text = text;
+            int width = Math.Max(260, Math.Min(1000, owner.Width));
+            Width = width;
+            int x = owner.Left;
+            int y = owner.Top - Height - 2;
+            if (y < Screen.FromHandle(owner.Handle).WorkingArea.Top)
+                y = owner.Top + 1;
+
+            Location = new Point(x, y);
+            TopMost = true;
+            if (!Visible)
+                Show(owner);
+
+            if (IsHandleCreated)
+            {
+                int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);
+                exStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_NCHITTEST)
+            {
+                m.Result = new IntPtr(HTTRANSPARENT);
+                return;
+            }
+            base.WndProc(ref m);
         }
     }
 }
