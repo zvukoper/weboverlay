@@ -1,0 +1,64 @@
+name: Finalize source integration
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fix source and clean helpers
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('Program.cs')
+          s = p.read_text(encoding='utf-8-sig')
+
+          if 'private static extern short GetAsyncKeyState' not in s:
+              anchor = '''        [DllImport("user32.dll")]\n        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);\n'''
+              addition = anchor + '''        [DllImport("user32.dll")]\n        private static extern short GetAsyncKeyState(int vKey);\n'''
+              if anchor not in s:
+                  raise SystemExit('GetAsyncKeyState insertion point not found')
+              s = s.replace(anchor, addition, 1)
+
+          if s.count('private void SaveState()') != 1:
+              raise SystemExit('Expected exactly one SaveState method')
+
+          p.write_text(s, encoding='utf-8-sig')
+
+          for rel in [
+              '.github/workflows/apply-core-fixes.yml',
+              '.github/workflows/apply-core-fixes2.yml',
+              '.github/workflows/finalize-core.yml',
+              '.github/workflows/source-finalize.yml',
+              'tools/apply_core_fixes.py',
+          ]:
+              q = Path(rel)
+              if q.exists():
+                  q.unlink()
+      - name: Validate source
+        run: |
+          grep -q 'private static extern short GetAsyncKeyState' Program.cs
+          test "$(grep -c 'private void SaveState()' Program.cs)" -eq 1
+          test ! -e RuntimeFixes.cs
+          test ! -e RuntimeOverrides.cs
+          test ! -e tools/apply_core_fixes.py
+          test ! -e .github/workflows/apply-core-fixes.yml
+          test ! -e .github/workflows/apply-core-fixes2.yml
+          test ! -e .github/workflows/finalize-core.yml
+      - name: Commit final source
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Finalize direct core implementation'
+          git push
