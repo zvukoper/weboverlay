@@ -1,5 +1,4 @@
-﻿// CORE_FIXES_V2
-#nullable disable
+﻿#nullable disable
 
 using System;
 using System.Collections.Generic;
@@ -1464,24 +1463,6 @@ namespace WebOverlay
             }
         }
 
-        private void SaveState()
-        {
-            try
-            {
-                File.WriteAllLines(GetStateFilePath(), new[]
-                {
-                    Location.X.ToString(),
-                    Location.Y.ToString(),
-                    _zoomFactor.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    Width.ToString(),
-                    Height.ToString()
-                });
-            }
-            catch (Exception ex)
-            {
-                Log($"SaveState ошибка: {ex.Message}");
-            }
-        }
 
         protected override void WndProc(ref Message m)
         {
