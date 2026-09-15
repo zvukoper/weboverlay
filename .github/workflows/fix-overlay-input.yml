@@ -1,0 +1,60 @@
+name: Fix OverlayForm input declaration
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch Program.cs
+        shell: pwsh
+        run: |
+          $path = 'Program.cs'
+          $text = Get-Content -Raw -Encoding UTF8 $path
+          $anchor = '        private const short KEY_DOWN_MASK = unchecked((short)0x8000);'
+          $decl = '        [DllImport("user32.dll")]' + [Environment]::NewLine + '        private static extern short GetAsyncKeyState(int vKey);' + [Environment]::NewLine
+          $pos = $text.IndexOf($anchor)
+          if ($pos -lt 0) { throw 'OverlayForm KEY_DOWN_MASK anchor not found' }
+          $before = $text.Substring(0, $pos)
+          $existing = $text.IndexOf('private static extern short GetAsyncKeyState(int vKey);', $pos)
+          if ($existing -lt 0 -or $existing -gt ($pos + 500)) {
+            $text = $text.Substring(0, $pos) + $decl + $text.Substring($pos)
+          }
+          Set-Content -Path $path -Value $text -Encoding UTF8
+
+      - name: Validate source
+        shell: pwsh
+        run: |
+          $text = Get-Content -Raw -Encoding UTF8 Program.cs
+          $marker = 'public class OverlayForm : Form'
+          $start = $text.IndexOf($marker)
+          if ($start -lt 0) { throw 'OverlayForm marker not found' }
+          $tail = $text.Substring($start)
+          if ($tail -notmatch '\[DllImport\("user32\.dll"\)\]\s+private static extern short GetAsyncKeyState\(int vKey\);') { throw 'OverlayForm GetAsyncKeyState declaration missing' }
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build WebOverlay.csproj --configuration Release --no-restore --nologo
+
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Program.cs
+          git commit -m 'Fix OverlayForm async key state input'
+          git push
+
+      - name: Remove migration workflow
+        shell: pwsh
+        run: |
+          git rm .github/workflows/fix-overlay-input.yml
+          git commit -m 'Remove temporary input fix workflow'
+          git push
