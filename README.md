@@ -1,321 +1,186 @@
 # WebOverlay
 
 [![.NET](https://img.shields.io/badge/.NET-10.0-blue)](https://dotnet.microsoft.com/)
+[![CI](https://github.com/zvukoper/weboverlay/actions/workflows/ci.yml/badge.svg)](https://github.com/zvukoper/weboverlay/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Transparent overlay window for web content | Прозрачное оверлей-окно для веб-контента**
+**WebOverlay** — a lightweight Windows overlay for web content, designed for use over desktop applications and games such as Euro Truck Simulator 2.
 
----
+## Features
 
-- [🇬🇧 English version](#english-version)
-- [🇷🇺 Русская версия](#русская-версия)
+- Transparent, borderless, always-on-top overlay window.
+- WebView2-based web content, including local HTML files.
+- Real mouse interaction with buttons, dialogs and other interactive web content when clickability is enabled.
+- Click-through mode when interaction is disabled.
+- Global hotkeys, including manipulation mode that works even when the overlay is not focused.
+- Multiple overlay windows with active/inactive selection borders.
+- Manipulation mode forces web content to remain visible and restores its previous visibility state when manipulation mode ends.
+- Small information strip above each selected window showing content name, size, zoom, position, bounds, monitor and clickability state.
+- Move the active overlay cyclically between available monitors.
+- Position, size and zoom are saved separately for each web content URL.
+- Single-instance operation with `append` support for opening additional windows.
+- Built-in multilingual support: English, Russian, French, German, Spanish, Chinese, Japanese and Arabic.
+- Self-contained single-file Windows publication.
 
----
+## Hotkeys
 
-## English version
+All listed controls are global unless noted otherwise. Bindings can be changed in `%AppData%\WebOverlay\config.json`.
 
-### Description
+| Combination | Action |
+|---|---|
+| `Ctrl+Shift+Alt+O` | Enter/leave manipulation mode |
+| `Ctrl+Shift+Alt+PageUp` | Select previous overlay window |
+| `Ctrl+Shift+Alt+PageDown` | Select next overlay window |
+| `Ctrl+Shift+Alt+J` | Move active window left |
+| `Ctrl+Shift+Alt+I` | Move active window up |
+| `Ctrl+Shift+Alt+K` | Move active window down |
+| `Ctrl+Shift+Alt+L` | Move active window right |
+| `Ctrl+Shift+Alt+[` | Decrease width |
+| `Ctrl+Shift+Alt+]` | Increase width |
+| `Ctrl+Shift+Alt+;` | Decrease height |
+| `Ctrl+Shift+Alt+'` | Increase height |
+| `Ctrl+Shift+Alt+P` | Hide/show web content |
+| `Ctrl+Shift+Alt+U` | Toggle mouse clickability |
+| `Ctrl+Shift+Alt+\` | Move active window to the next monitor |
+| `Ctrl+Shift+Alt++` | Zoom in |
+| `Ctrl+Shift+Alt+-` | Zoom out |
+| `Esc` | Close the overlay application |
 
-**WebOverlay** is a lightweight Windows application that creates a transparent, borderless window always on top of other windows. It loads a web page (or a local HTML file) and allows you to interact with it while keeping the background transparent. The window can be locked (click‑through mode) or unlocked to interact with the page, moved, resized, and zoomed – all via global hotkeys.
+## Manipulation mode
 
-The application remembers the position, size and zoom level for each URL separately. It supports multiple languages (English, Russian, French, German, Spanish, Chinese, Japanese, Arabic) and can be easily extended with your own localization files.
+Press `Ctrl+Shift+Alt+O` to enter manipulation mode. In this mode the selected overlay is highlighted and the content remains visible even when it was hidden by normal application logic. The information strip above the window is also shown.
 
-Since version 2026-08-11, **WebOverlay supports multiple windows** – you can open several web pages at once and switch between them in manipulation mode.
+Press the same hotkey again to leave manipulation mode. The normal content visibility logic is restored.
 
-### Features
+`Ctrl+Shift+Alt+\` cycles the active overlay through all detected monitors. The overlay keeps its relative position where possible and is clamped to the target monitor's working area.
 
-- ✅ **Fully transparent background** – integrates seamlessly with any desktop or game.
-- ✅ **Always on top** – stays above all other windows.
-- ✅ **Lock/unlock mode** – when locked, all clicks pass through; when unlocked, you can interact with the web page.
-- ✅ **Multi‑window support** – open additional windows with `append` and switch between them.
-- ✅ **Visual selection border** – in manipulation mode, the active window gets a yellow border, all others get a blue border.
-- ✅ **Keyboard control** – move, resize, zoom, hide/show, toggle clickability, toggle lock, and switch windows using global hotkeys.
-- ✅ **Separate state per URL** – position, size and zoom are saved independently for each address.
-- ✅ **Single‑instance** – only one instance runs; subsequent launches with a new URL reload the content in the existing window (or add a new window with `append`).
-- ✅ **Multi‑language** – choose your language at first launch; easily add custom locales.
-- ✅ **Portable** – published as a single executable (self‑contained) – no .NET Runtime required.
-- ✅ **Command‑line support** – pass a URL as an argument to load it directly; use `append` to add more windows.
+## Running
 
-### Installation & Running
+Without arguments, WebOverlay opens its built-in help page:
 
-#### 1. Publish the application (one‑time)
+```text
+WebOverlay.exe
+```
 
-Open a terminal in the project folder and run:
+Open a web page directly:
 
-    dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
+```text
+WebOverlay.exe https://example.com
+```
 
-The executable `WebOverlay.exe` will be placed in the `publish` folder.
+Open a local HTML file:
 
-#### 2. Add to PATH (optional)
+```text
+WebOverlay.exe file:///C:/path/to/page.html
+```
 
-To run `weboverlay.exe` from any directory, add the `publish` folder (or wherever you copied the .exe) to your system `PATH` environment variable.
+Add another overlay without replacing the current one:
 
-#### 3. Launch
+```text
+WebOverlay.exe append https://example.org
+```
 
-- **Without arguments** – opens a built‑in help page explaining all features and hotkeys.
+Only one WebOverlay process runs at a time. A subsequent launch sends its command to the existing instance.
 
-    weboverlay.exe
+## Configuration
 
-- **With a URL** – loads the specified web page.
+Configuration is stored in:
 
-    weboverlay.exe https://example.com
+```text
+%AppData%\WebOverlay\config.json
+```
 
-or a local file:
+Example:
 
-    weboverlay.exe file:///C:/path/to/page.html
+```json
+{
+  "Language": "en",
+  "Clickable": true,
+  "ToggleLock": "Ctrl+Shift+Alt+O",
+  "MoveLeft": "Ctrl+Shift+Alt+J",
+  "MoveRight": "Ctrl+Shift+Alt+L",
+  "MoveUp": "Ctrl+Shift+Alt+I",
+  "MoveDown": "Ctrl+Shift+Alt+K",
+  "ZoomIn": "Ctrl+Shift+Alt+OemPlus",
+  "ZoomOut": "Ctrl+Shift+Alt+OemMinus",
+  "ToggleHide": "Ctrl+Shift+Alt+P",
+  "ToggleClickable": "Ctrl+Shift+Alt+U",
+  "MoveMonitor": "Ctrl+Shift+Alt+Oem5",
+  "ResizeWidthDecrease": "Ctrl+Shift+Alt+OemOpenBrackets",
+  "ResizeWidthIncrease": "Ctrl+Shift+Alt+OemCloseBrackets",
+  "ResizeHeightDecrease": "Ctrl+Shift+Alt+OemSemicolon",
+  "ResizeHeightIncrease": "Ctrl+Shift+Alt+OemQuotes",
+  "ResizeStep": 10
+}
+```
 
-- **To add another window** (without replacing the current one) – use `append`:
+Per-content window state is stored under `%AppData%\WebOverlay\config\` and contains position, size and zoom information.
 
-    weboverlay.exe append https://another-page.com
+## Build from source
 
-You can add as many windows as you like; each will appear with a small offset.
+Requirements:
 
-> **Note:** On the first run, you will be prompted to choose your language. The selection is saved in `%AppData%\WebOverlay\config.json`. You can click the config path in the dialog to open the file (or the folder if it doesn't exist yet).
+- Windows 10/11 x64.
+- .NET 10 SDK.
+- Microsoft Edge WebView2 Runtime.
 
-### Global Hotkeys (Controls)
+Build:
 
-All hotkeys work globally – even when the window is not focused.
+```powershell
+dotnet restore WebOverlay.csproj
+dotnet build WebOverlay.csproj -c Release
+```
 
-| Key Combination                              | Action                                      |
-|----------------------------------------------|---------------------------------------------|
-| `Ctrl+Shift+Alt+O`                           | **Lock / Unlock** the window (toggle manipulation mode) |
-| `Ctrl+Shift+Alt+PageUp`                      | Switch to the **previous** window           |
-| `Ctrl+Shift+Alt+PageDown`                    | Switch to the **next** window               |
-| `Ctrl+Shift+Alt+J`                           | Move window **left** (5px)                  |
-| `Ctrl+Shift+Alt+I`                           | Move window **up** (5px)                    |
-| `Ctrl+Shift+Alt+K`                           | Move window **down** (5px)                  |
-| `Ctrl+Shift+Alt+L`                           | Move window **right** (5px)                 |
-| `Ctrl+Shift+Alt+[` (open bracket)            | **Decrease width** (10px)                   |
-| `Ctrl+Shift+Alt+]` (close bracket)           | **Increase width** (10px)                   |
-| `Ctrl+Shift+Alt+;` (semicolon)               | **Decrease height** (10px)                  |
-| `Ctrl+Shift+Alt+'` (apostrophe)              | **Increase height** (10px)                  |
-| `Ctrl+Shift+Alt+P`                           | **Hide / Show** web content (all windows or active only, depending on manipulation mode) |
-| `Ctrl+Shift+Alt+U`                           | **Toggle clickability** (enable/disable mouse interaction) |
-| `Ctrl+Shift+Alt++` (plus)                    | **Zoom in** (0.1 step, range 0.3–3.0)       |
-| `Ctrl+Shift+Alt+-` (minus)                   | **Zoom out** (0.1 step, range 0.3–3.0)      |
-| `Esc`                                        | **Close** the application                   |
+Publish the same self-contained single-file format used by CI:
 
-> The actual key bindings can be remapped in `config.json` (see below).
+```powershell
+dotnet publish WebOverlay.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -p:PublishSingleFile=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true `
+  -p:PublishTrimmed=false `
+  -o ./publish
+```
 
-### Configuration & Customization
+The resulting executable is `publish\WebOverlay.exe`.
 
-All settings are stored in `%AppData%\WebOverlay\`.
+## Continuous Integration
 
-#### `config.json`
+GitHub Actions workflow: `.github/workflows/ci.yml`.
 
-Contains language selection and key bindings. Example:
+The CI runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. It uses a Windows runner and performs:
 
-    {
-      "Language": "en",
-      "Clickable": true,
-      "ToggleLock": "Ctrl+Shift+Alt+O",
-      "MoveLeft": "Ctrl+Shift+Alt+J",
-      "MoveRight": "Ctrl+Shift+Alt+L",
-      "MoveUp": "Ctrl+Shift+Alt+I",
-      "MoveDown": "Ctrl+Shift+Alt+K",
-      "ZoomIn": "Ctrl+Shift+Alt+OemPlus",
-      "ZoomOut": "Ctrl+Shift+Alt+OemMinus",
-      "ToggleHide": "Ctrl+Shift+Alt+P",
-      "ToggleClickable": "Ctrl+Shift+Alt+U",
-      "ResizeWidthDecrease": "Ctrl+Shift+Alt+OemOpenBrackets",
-      "ResizeWidthIncrease": "Ctrl+Shift+Alt+OemCloseBrackets",
-      "ResizeHeightDecrease": "Ctrl+Shift+Alt+OemSemicolon",
-      "ResizeHeightIncrease": "Ctrl+Shift+Alt+OemQuotes",
-      "ResizeStep": 10
-    }
+1. Dependency restore.
+2. Release build.
+3. Self-contained `win-x64` single-file publish.
+4. Verification that `WebOverlay.exe` was produced.
+5. Upload of the published executable as a workflow artifact for 14 days.
 
-You can edit this file to change the language, toggle clickability, or redefine any hotkey.
+The CI also sets `CI=true`, so the local-only post-publish copy in the project file is not executed on GitHub runners.
 
-#### Locales
+## Data and locales
 
-Localization files are stored in `%AppData%\WebOverlay\locales\*.txt`.  
-Each file uses `key=value` pairs. To add a new language, create a `<lang>.txt` file (e.g., `it.txt`) and set `"Language": "it"` in `config.json`.
+```text
+%AppData%\WebOverlay\
+├── config.json
+├── debug.log
+├── config\
+│   └── <content-state>.txt
+└── locales\
+    ├── en.txt
+    ├── ru.txt
+    ├── fr.txt
+    ├── de.txt
+    ├── es.txt
+    ├── zh.txt
+    ├── ja.txt
+    └── ar.txt
+```
 
-### File Structure
+Localization files use simple `key=value` pairs. Additional languages can be added through the same format.
 
-    %AppData%\WebOverlay\
-    ├── config.json                # main configuration
-    ├── debug.log                  # debug log (if any errors)
-    ├── config\                    # per‑URL state files
-    │   └── <url_hash>.txt         # position, size, zoom
-    └── locales\                   # localization files
-        ├── en.txt
-        ├── ru.txt
-        ├── fr.txt
-        ├── de.txt
-        ├── es.txt
-        ├── zh.txt
-        ├── ja.txt
-        └── ar.txt
-
-### Requirements
-
-- Windows 10 / 11 (64‑bit)
-- [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) – usually already installed on Windows 11.
-
-### Build from Source
-
-    git clone https://github.com/yourusername/WebOverlay.git
-    cd WebOverlay
-    dotnet build -c Release
-
-### License
+## License
 
 This project is distributed under the [MIT License](LICENSE).
-
-**Enjoy!** 🚀
-
----
-
-## Русская версия
-
-### Описание
-
-**WebOverlay** – это лёгкое Windows-приложение, создающее прозрачное окно без рамок, которое всегда находится поверх всех окон. Оно загружает веб-страницу (или локальный HTML-файл) и позволяет взаимодействовать с ней, сохраняя прозрачный фон. Окно можно заблокировать (режим «сквозного клика») или разблокировать для взаимодействия со страницей, перемещать, изменять размер, масштабировать и включать/выключать кликабельность – всё через глобальные горячие клавиши.
-
-Приложение запоминает позицию, размер и масштаб отдельно для каждого URL. Поддерживается несколько языков (английский, русский, французский, немецкий, испанский, китайский, японский, арабский), и вы можете легко добавить свои локализации.
-
-Начиная с версии 2026-08-11, **WebOverlay поддерживает несколько окон** – вы можете открыть несколько веб-страниц одновременно и переключаться между ними в режиме манипуляций.
-
-### Возможности
-
-- ✅ **Полностью прозрачный фон** – гармонично вписывается в рабочий стол или игру.
-- ✅ **Всегда поверх всех окон** – не перекрывается другими приложениями.
-- ✅ **Режимы блокировки/разблокировки** – в заблокированном состоянии клики проходят сквозь; в разблокированном – можно взаимодействовать со страницей.
-- ✅ **Поддержка нескольких окон** – добавляйте новые окна с помощью `append` и переключайтесь между ними.
-- ✅ **Визуальная рамка выбора** – в режиме манипуляций активное окно подсвечивается жёлтой рамкой, остальные – синей.
-- ✅ **Управление с клавиатуры** – перемещение, изменение размера, масштабирование, скрытие/показ, переключение кликабельности, режима и окон глобальными хоткеями.
-- ✅ **Раздельное сохранение состояния для каждого URL** – позиция, размер и масштаб сохраняются независимо для каждого адреса.
-- ✅ **Один экземпляр** – при повторном запуске с новым URL содержимое перезагружается в существующем окне (или добавляется новое с `append`).
-- ✅ **Многоязычность** – выбор языка при первом запуске; легко добавить свои локализации.
-- ✅ **Переносимость** – публикуется как один EXE-файл (самодостаточный) – не требует установленного .NET Runtime.
-- ✅ **Поддержка командной строки** – передайте URL как аргумент для прямой загрузки; используйте `append` для добавления окон.
-
-### Установка и запуск
-
-#### 1. Публикация приложения (один раз)
-
-Откройте терминал в папке проекта и выполните:
-
-    dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
-
-Исполняемый файл `WebOverlay.exe` появится в папке `publish`.
-
-#### 2. Добавление в PATH (по желанию)
-
-Чтобы запускать `weboverlay.exe` из любой папки, добавьте папку `publish` (или туда, куда вы скопировали .exe) в системную переменную `PATH`.
-
-#### 3. Запуск
-
-- **Без аргументов** – открывается встроенная справочная страница со всеми функциями и комбинациями клавиш.
-
-    weboverlay.exe
-
-- **С URL** – загружается указанная веб-страница.
-
-    weboverlay.exe https://example.com
-
-или локальный файл:
-
-    weboverlay.exe file:///C:/path/to/page.html
-
-- **Чтобы добавить ещё одно окно** (не перезагружая текущее) – используйте `append`:
-
-    weboverlay.exe append https://another-page.com
-
-Можно добавить сколько угодно окон – каждое будет смещено относительно предыдущего.
-
-> **Примечание:** При первом запуске будет предложено выбрать язык. Выбор сохраняется в `%AppData%\WebOverlay\config.json`. В диалоге можно кликнуть на путь к конфигу, чтобы открыть файл (или папку, если файл ещё не создан).
-
-### Горячие клавиши (управление)
-
-Все комбинации работают глобально – даже когда окно не в фокусе.
-
-| Комбинация клавиш                            | Действие                                      |
-|----------------------------------------------|-----------------------------------------------|
-| `Ctrl+Shift+Alt+O`                           | **Заблокировать / Разблокировать** окно (переключение режима манипуляций) |
-| `Ctrl+Shift+Alt+PageUp`                      | Переключиться на **предыдущее** окно          |
-| `Ctrl+Shift+Alt+PageDown`                    | Переключиться на **следующее** окно           |
-| `Ctrl+Shift+Alt+J`                           | Переместить окно **влево** (5px)              |
-| `Ctrl+Shift+Alt+I`                           | Переместить окно **вверх** (5px)              |
-| `Ctrl+Shift+Alt+K`                           | Переместить окно **вниз** (5px)               |
-| `Ctrl+Shift+Alt+L`                           | Переместить окно **вправо** (5px)             |
-| `Ctrl+Shift+Alt+[`  (открывающая скобка)     | **Уменьшить ширину** (10px)                   |
-| `Ctrl+Shift+Alt+]`  (закрывающая скобка)     | **Увеличить ширину** (10px)                   |
-| `Ctrl+Shift+Alt+;`  (точка с запятой)        | **Уменьшить высоту** (10px)                   |
-| `Ctrl+Shift+Alt+'`  (апостроф)               | **Увеличить высоту** (10px)                   |
-| `Ctrl+Shift+Alt+P`                           | **Скрыть / Показать** веб-контент (все окна или только активное, в зависимости от режима манипуляций) |
-| `Ctrl+Shift+Alt+U`                           | **Включить / Выключить кликабельность** (взаимодействие мышью) |
-| `Ctrl+Shift+Alt++`  (плюс)                   | **Увеличить масштаб** (шаг 0.1, диапазон 0.3–3.0) |
-| `Ctrl+Shift+Alt+-`  (минус)                  | **Уменьшить масштаб** (шаг 0.1, диапазон 0.3–3.0) |
-| `Esc`                                        | **Закрыть** приложение                        |
-
-> Реальные привязки клавиш можно изменить в `config.json` (см. ниже).
-
-### Настройка и кастомизация
-
-Все настройки хранятся в `%AppData%\WebOverlay\`.
-
-#### `config.json`
-
-Содержит выбор языка, состояние кликабельности и привязки клавиш. Пример:
-
-    {
-      "Language": "ru",
-      "Clickable": true,
-      "ToggleLock": "Ctrl+Shift+Alt+O",
-      "MoveLeft": "Ctrl+Shift+Alt+J",
-      "MoveRight": "Ctrl+Shift+Alt+L",
-      "MoveUp": "Ctrl+Shift+Alt+I",
-      "MoveDown": "Ctrl+Shift+Alt+K",
-      "ZoomIn": "Ctrl+Shift+Alt+OemPlus",
-      "ZoomOut": "Ctrl+Shift+Alt+OemMinus",
-      "ToggleHide": "Ctrl+Shift+Alt+P",
-      "ToggleClickable": "Ctrl+Shift+Alt+U",
-      "ResizeWidthDecrease": "Ctrl+Shift+Alt+OemOpenBrackets",
-      "ResizeWidthIncrease": "Ctrl+Shift+Alt+OemCloseBrackets",
-      "ResizeHeightDecrease": "Ctrl+Shift+Alt+OemSemicolon",
-      "ResizeHeightIncrease": "Ctrl+Shift+Alt+OemQuotes",
-      "ResizeStep": 10
-    }
-
-Вы можете редактировать этот файл, чтобы изменить язык, состояние кликабельности или переназначить любую комбинацию клавиш.
-
-#### Локализация
-
-Файлы локализации хранятся в `%AppData%\WebOverlay\locales\*.txt`.  
-Каждый файл содержит пары `ключ=значение`. Чтобы добавить новый язык, создайте файл `<lang>.txt` (например, `it.txt`) и установите `"Language": "it"` в `config.json`.
-
-### Структура файлов
-
-    %AppData%\WebOverlay\
-    ├── config.json                # основной конфиг
-    ├── debug.log                  # лог отладки (если есть ошибки)
-    ├── config\                    # файлы состояния для каждого URL
-    │   └── <url_hash>.txt         # позиция, размер, масштаб
-    └── locales\                   # файлы локализаций
-        ├── en.txt
-        ├── ru.txt
-        ├── fr.txt
-        ├── de.txt
-        ├── es.txt
-        ├── zh.txt
-        ├── ja.txt
-        └── ar.txt
-
-### Требования
-
-- Windows 10 / 11 (64‑bit)
-- [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) – обычно уже установлен в Windows 11.
-
-### Сборка из исходников
-
-    git clone https://github.com/yourusername/WebOverlay.git
-    cd WebOverlay
-    dotnet build -c Release
-
-### Лицензия
-
-Проект распространяется под лицензией [MIT](LICENSE).
-
-**Приятного использования!** 🚀
