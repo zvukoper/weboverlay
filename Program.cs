@@ -737,6 +737,8 @@ namespace WebOverlay
         private const int SWP_FRAMECHANGED = 0x0020;
         private const int WM_NCHITTEST = 0x0084;
         private const int HTTRANSPARENT = -1;
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
         private const short KEY_DOWN_MASK = unchecked((short)0x8000);
         private const int VK_CONTROL = 0x11;
         private const int VK_SHIFT = 0x10;
@@ -1656,4 +1658,5 @@ namespace WebOverlay
     }
 
 }
+
 
