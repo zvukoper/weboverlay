@@ -1,0 +1,72 @@
+name: WebOverlay CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: windows-latest
+    env:
+      CI: true
+      DOTNET_NOLOGO: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          cache: true
+          cache-dependency-path: WebOverlay.csproj
+
+      - name: Restore
+        run: dotnet restore WebOverlay.csproj
+
+      - name: Build
+        run: dotnet build WebOverlay.csproj --configuration Release --no-restore --nologo
+
+      - name: Publish
+        run: >-
+          dotnet publish WebOverlay.csproj
+          --configuration Release
+          --no-restore
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:PublishTrimmed=false
+          -o ./ci-publish
+
+      - name: Verify published executable
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD 'ci-publish\WebOverlay.exe'
+          if (-not (Test-Path $exe)) {
+            Write-Error "Published executable was not created: $exe"
+            exit 1
+          }
+          $item = Get-Item $exe
+          Write-Host "Published: $($item.FullName)"
+          Write-Host "Size: $($item.Length) bytes"
+          if ($item.Length -lt 1000000) {
+            Write-Error "Published executable looks unexpectedly small."
+            exit 1
+          }
+
+      - name: Upload published artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebOverlay-win-x64
+          path: ci-publish/WebOverlay.exe
+          if-no-files-found: error
+          retention-days: 14
