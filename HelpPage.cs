@@ -3,37 +3,37 @@ using WebOverlay;
 public static class HelpPage
 {
     public static string GetHelpHtml(AppConfig config)
-    public static string GetHelpHtml(AppConfig config)
-{
-    string title = Localization.Get("HelpPageTitle");
-    string header = Localization.Get("HelpPageHeader");
-    string desc = Localization.Get("HelpPageDescription");
-    string ctrlTitle = Localization.Get("HelpPageControlsTitle");
-    string launchInfo = Localization.Get("HelpPageLaunchInfo");
-    string launchCode = Localization.Get("HelpPageLaunchCode");
-    string launchDesc = Localization.Get("HelpPageLaunchDesc");
-    string featuresTitle = Localization.Get("HelpPageFeaturesTitle");
-    string f1 = Localization.Get("HelpPageFeature1");
-    string f2 = Localization.Get("HelpPageFeature2");
-    string f3 = Localization.Get("HelpPageFeature3");
-    string f4 = Localization.Get("HelpPageFeature4");
-    string footer = Localization.Get("HelpPageFooter");
+    {
+        string title = Localization.Get("HelpPageTitle");
+        string header = Localization.Get("HelpPageHeader");
+        string desc = Localization.Get("HelpPageDescription");
+        string ctrlTitle = Localization.Get("HelpPageControlsTitle");
+        string launchInfo = Localization.Get("HelpPageLaunchInfo");
+        string launchCode = Localization.Get("HelpPageLaunchCode");
+        string launchDesc = Localization.Get("HelpPageLaunchDesc");
+        string featuresTitle = Localization.Get("HelpPageFeaturesTitle");
+        string f1 = Localization.Get("HelpPageFeature1");
+        string f2 = Localization.Get("HelpPageFeature2");
+        string f3 = Localization.Get("HelpPageFeature3");
+        string f4 = Localization.Get("HelpPageFeature4");
+        string footer = Localization.Get("HelpPageFooter");
 
-    string toggle = config.ToggleLock;
-    string left = config.MoveLeft;
-    string up = config.MoveUp;
-    string down = config.MoveDown;
-    string right = config.MoveRight;
-    string zIn = config.ZoomIn;
-    string zOut = config.ZoomOut;
-    string hide = config.ToggleHide;
-    string clickable = config.ToggleClickable;
-    string wDec = config.ResizeWidthDecrease;
-    string wInc = config.ResizeWidthIncrease;
-    string hDec = config.ResizeHeightDecrease;
-    string hInc = config.ResizeHeightIncrease;
+        string toggle = config.ToggleLock;
+        string left = config.MoveLeft;
+        string up = config.MoveUp;
+        string down = config.MoveDown;
+        string right = config.MoveRight;
+        string zIn = config.ZoomIn;
+        string zOut = config.ZoomOut;
+        string hide = config.ToggleHide;
+        string clickable = config.ToggleClickable;
+        string monitor = config.MoveMonitor;
+        string wDec = config.ResizeWidthDecrease;
+        string wInc = config.ResizeWidthIncrease;
+        string hDec = config.ResizeHeightDecrease;
+        string hInc = config.ResizeHeightIncrease;
 
-    return $@"<!DOCTYPE html>
+        return $@"<!DOCTYPE html>
 <html>
 <head><meta charset=""UTF-8""><title>{title}</title>
 <style>
@@ -79,6 +79,7 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
 <li><kbd>{zOut}</kbd> — {Localization.Get("ZoomOutDesc")}</li>
 <li><kbd>{hide}</kbd> — {Localization.Get("ToggleHideDesc")}</li>
 <li><kbd>{clickable}</kbd> — {Localization.Get("ToggleClickableDesc")}</li>
+<li><kbd>{monitor}</kbd> — {Localization.Get("MoveMonitorDesc", "move active window to next monitor")}</li>
 <li><kbd>{wDec}</kbd> — {Localization.Get("ResizeWidthDecreaseDesc")}</li>
 <li><kbd>{wInc}</kbd> — {Localization.Get("ResizeWidthIncreaseDesc")}</li>
 <li><kbd>{hDec}</kbd> — {Localization.Get("ResizeHeightDecreaseDesc")}</li>
@@ -98,5 +99,5 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
 <div class=""footer"">{footer}</div>
 </div>
 </body></html>";
-}
+    }
 }
