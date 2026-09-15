@@ -1,4 +1,4 @@
-﻿#nullable disable
+#nullable disable
 
 using System;
 using System.Collections.Generic;
@@ -1210,10 +1210,10 @@ namespace WebOverlay
             int dx = 0;
             int dy = 0;
 
-            if (IsBindingHeld(_config.MoveLeft)) dx -= 2;
-            if (IsBindingHeld(_config.MoveRight)) dx += 2;
-            if (IsBindingHeld(_config.MoveUp)) dy -= 2;
-            if (IsBindingHeld(_config.MoveDown)) dy += 2;
+            if (IsBindingHeld(_config.MoveLeft)) dx -= 1;
+            if (IsBindingHeld(_config.MoveRight)) dx += 1;
+            if (IsBindingHeld(_config.MoveUp)) dy -= 1;
+            if (IsBindingHeld(_config.MoveDown)) dy += 1;
 
             if (dx == 0 && dy == 0)
                 return;
@@ -1636,7 +1636,7 @@ namespace WebOverlay
                 ShowInTaskbar = false;
                 TopMost = true;
                 BackColor = Color.Black;
-                Opacity = 0.25;
+                Opacity = 0.15;
                 Width = 300;
                 Height = 18;
             }
@@ -1656,3 +1656,4 @@ namespace WebOverlay
     }
 
 }
+
