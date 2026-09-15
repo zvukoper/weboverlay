@@ -17,38 +17,33 @@ jobs:
         shell: pwsh
         run: |
           $path = 'Program.cs'
-          $text = Get-Content $path -Raw -Encoding UTF8
+          $text = Get-Content -Raw -Encoding UTF8 $path
 
-          if ($text -notmatch 'private static extern short GetAsyncKeyState\(int vKey\);') {
-            $needle = "        [DllImport(\"user32.dll\")]`r`n        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);"
-            $replacement = $needle + "`r`n        [DllImport(\"user32.dll\")]`r`n        private static extern short GetAsyncKeyState(int vKey);"
-            $idx = $text.IndexOf('        private const short KEY_DOWN_MASK =')
-            if ($idx -lt 0) { throw 'KEY_DOWN_MASK anchor not found' }
-            $before = $text.Substring(0, $idx)
-            $after = $text.Substring($idx)
-            $local = $before.LastIndexOf('        [DllImport("user32.dll")]')
-            $blockStart = $before.LastIndexOf("`n", $local)
-            $block = $before.Substring($blockStart + 1)
-            if ($block -notmatch 'UnregisterHotKey') { throw 'Overlay UnregisterHotKey anchor not found' }
-            $before = $before.Substring(0, $blockStart + 1) + $replacement + "`r`n"
-            $text = $before + $after
+          $anchor = "        private const short KEY_DOWN_MASK = unchecked((short)0x8000);"
+          $pos = $text.IndexOf($anchor)
+          if ($pos -lt 0) { throw 'KEY_DOWN_MASK anchor not found' }
+
+          $prefix = $text.Substring(0, $pos)
+          if ($prefix -notmatch 'private static extern short GetAsyncKeyState\(int vKey\);') {
+            $decl = "        [DllImport(`"user32.dll`')]`r`n        private static extern short GetAsyncKeyState(int vKey);`r`n"
+            $text = $prefix + $decl + $text.Substring($pos)
           }
 
           $text = $text.Replace('if (IsBindingHeld(_config.MoveLeft)) dx -= 2;', 'if (IsBindingHeld(_config.MoveLeft)) dx -= 1;')
           $text = $text.Replace('if (IsBindingHeld(_config.MoveRight)) dx += 2;', 'if (IsBindingHeld(_config.MoveRight)) dx += 1;')
           $text = $text.Replace('if (IsBindingHeld(_config.MoveUp)) dy -= 2;', 'if (IsBindingHeld(_config.MoveUp)) dy -= 1;')
           $text = $text.Replace('if (IsBindingHeld(_config.MoveDown)) dy += 2;', 'if (IsBindingHeld(_config.MoveDown)) dy += 1;')
-          $text = $text.Replace('BackColor = Color.Black;`r`n                Opacity = 0.25;', 'BackColor = Color.Black;`r`n                Opacity = 0.15;')
+          $text = $text.Replace('Opacity = 0.25;', 'Opacity = 0.15;')
 
-          Set-Content $path -Value $text -Encoding UTF8
+          Set-Content -Path $path -Value $text -Encoding UTF8
 
       - name: Validate source
         shell: pwsh
         run: |
-          $text = Get-Content Program.cs -Raw -Encoding UTF8
+          $text = Get-Content -Raw -Encoding UTF8 Program.cs
           if ($text -notmatch 'private static extern short GetAsyncKeyState\(int vKey\);') { throw 'GetAsyncKeyState declaration missing' }
           if ($text -match 'if \(IsBindingHeld\(_config\.MoveLeft\)\) dx -= 2;') { throw '2px movement remains' }
-          if ($text -match 'Opacity = 0\.25;') { throw '25% signature opacity remains' }
+          if ($text -match 'Opacity = 0\.25;') { throw '25% opacity remains' }
 
       - name: Commit
         shell: pwsh
