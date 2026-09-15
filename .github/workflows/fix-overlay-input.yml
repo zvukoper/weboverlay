@@ -18,39 +18,49 @@ jobs:
         run: |
           $path = 'Program.cs'
           $text = Get-Content -Raw -Encoding UTF8 $path
+          $marker = 'public class OverlayForm : Form'
+          $start = $text.IndexOf($marker)
+          if ($start -lt 0) { throw 'OverlayForm marker not found' }
+
           $anchor = '        private const short KEY_DOWN_MASK = unchecked((short)0x8000);'
-          $decl = '        [DllImport("user32.dll")]' + [Environment]::NewLine + '        private static extern short GetAsyncKeyState(int vKey);' + [Environment]::NewLine
-          $pos = $text.IndexOf($anchor)
+          $pos = $text.IndexOf($anchor, $start)
           if ($pos -lt 0) { throw 'OverlayForm KEY_DOWN_MASK anchor not found' }
-          $before = $text.Substring(0, $pos)
-          $existing = $text.IndexOf('private static extern short GetAsyncKeyState(int vKey);', $pos)
-          if ($existing -lt 0 -or $existing -gt ($pos + 500)) {
+
+          $overlayTail = $text.Substring($start)
+          $declRegex = '\[DllImport\("user32\.dll"\)\]\s+private static extern short GetAsyncKeyState\(int vKey\);'
+          if ($overlayTail -notmatch $declRegex) {
+            $decl = '        [DllImport("user32.dll")]' + [Environment]::NewLine + '        private static extern short GetAsyncKeyState(int vKey);' + [Environment]::NewLine
             $text = $text.Substring(0, $pos) + $decl + $text.Substring($pos)
           }
+
           Set-Content -Path $path -Value $text -Encoding UTF8
 
       - name: Validate source
         shell: pwsh
         run: |
           $text = Get-Content -Raw -Encoding UTF8 Program.cs
-          $marker = 'public class OverlayForm : Form'
-          $start = $text.IndexOf($marker)
+          $start = $text.IndexOf('public class OverlayForm : Form')
           if ($start -lt 0) { throw 'OverlayForm marker not found' }
           $tail = $text.Substring($start)
           if ($tail -notmatch '\[DllImport\("user32\.dll"\)\]\s+private static extern short GetAsyncKeyState\(int vKey\);') { throw 'OverlayForm GetAsyncKeyState declaration missing' }
+          if ($tail -notmatch 'if \(IsBindingHeld\(_config\.MoveLeft\)\) dx -= 1;') { throw '1px left movement missing' }
+          if ($tail -notmatch 'if \(IsBindingHeld\(_config\.MoveRight\)\) dx \+= 1;') { throw '1px right movement missing' }
+          if ($tail -notmatch 'if \(IsBindingHeld\(_config\.MoveUp\)\) dy -= 1;') { throw '1px up movement missing' }
+          if ($tail -notmatch 'if \(IsBindingHeld\(_config\.MoveDown\)\) dy \+= 1;') { throw '1px down movement missing' }
+          if ($tail -notmatch 'Opacity = 0\.15;') { throw 'Signature opacity is not 15%' }
 
       - name: Build
         shell: pwsh
-        run: dotnet build WebOverlay.csproj --configuration Release --no-restore --nologo
+        run: dotnet build WebOverlay.csproj --configuration Release --nologo
 
-      - name: Commit fix
+      - name: Commit source fix
         shell: pwsh
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Program.cs
-          git commit -m 'Fix OverlayForm async key state input'
-          git push
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { Write-Host 'Program.cs already fixed' } else { git commit -m 'Fix OverlayForm async key state input'; git push }
 
       - name: Remove migration workflow
         shell: pwsh
