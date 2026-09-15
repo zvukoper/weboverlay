@@ -15,9 +15,11 @@
 - Global hotkeys, including manipulation mode that works even when the overlay is not focused.
 - Multiple overlay windows with active/inactive selection borders.
 - Manipulation mode forces web content to remain visible and restores its previous visibility state when manipulation mode ends.
-- Small information strip above each selected window showing content name, size, zoom, position, bounds, monitor and clickability state.
+- Information strip above each selected window showing content name, size, zoom, position, bounds, monitor and clickability state.
 - Move the active overlay cyclically between available monitors.
-- Position, size and zoom are saved separately for each web content URL.
+- Continuous 1-pixel movement while holding the configured I/J/K/L movement shortcuts in manipulation mode.
+- Window state is stored independently for each web content URL and monitor.
+- Manipulation mode calls `debugShow()` in the loaded web content when the active window enters manipulation mode.
 - Single-instance operation with `append` support for opening additional windows.
 - Built-in multilingual support: English, Russian, French, German, Spanish, Chinese, Japanese and Arabic.
 - Self-contained single-file Windows publication.
@@ -48,11 +50,13 @@ All listed controls are global unless noted otherwise. Bindings can be changed i
 
 ## Manipulation mode
 
-Press `Ctrl+Shift+Alt+O` to enter manipulation mode. In this mode the selected overlay is highlighted and the content remains visible even when it was hidden by normal application logic. The information strip above the window is also shown.
+Press `Ctrl+Shift+Alt+O` to enter manipulation mode. The selected overlay is highlighted with a yellow border, other overlays with a blue border, and the information strip is shown above each overlay.
 
-Press the same hotkey again to leave manipulation mode. The normal content visibility logic is restored.
+While manipulation mode is active, holding the configured movement shortcuts continuously moves the active window by **1 pixel per timer tick**. The movement no longer depends on repeated `KeyDown` messages from WebView2.
 
-`Ctrl+Shift+Alt+\` cycles the active overlay through all detected monitors. The overlay keeps its relative position where possible and is clamped to the target monitor's working area.
+When the active overlay is on a monitor that already has saved state for the current web content, that monitor's saved position, size and zoom are restored. The first time the content is used on a monitor without saved state, a new monitor-specific state file is created from the current/default state.
+
+The active web page receives a `debugShow()` call when manipulation mode becomes active (and briefly retried after navigation/activation so pages that define the function later still receive it).
 
 ## Running
 
@@ -114,7 +118,7 @@ Example:
 }
 ```
 
-Per-content window state is stored under `%AppData%\WebOverlay\config\` and contains position, size and zoom information.
+Per-content and per-monitor window state is stored under `%AppData%\WebOverlay\config\`.
 
 ## Build from source
 
@@ -131,7 +135,7 @@ dotnet restore WebOverlay.csproj
 dotnet build WebOverlay.csproj -c Release
 ```
 
-Publish the same self-contained single-file format used by CI:
+Publish the self-contained single-file version:
 
 ```powershell
 dotnet publish WebOverlay.csproj `
@@ -150,15 +154,9 @@ The resulting executable is `publish\WebOverlay.exe`.
 
 GitHub Actions workflow: `.github/workflows/ci.yml`.
 
-The CI runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. It uses a Windows runner and performs:
+The CI runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. It uses a Windows runner and performs dependency restore, Release build, self-contained `win-x64` publish, verification of `WebOverlay.exe`, and artifact upload.
 
-1. Dependency restore.
-2. Release build.
-3. Self-contained `win-x64` single-file publish.
-4. Verification that `WebOverlay.exe` was produced.
-5. Upload of the published executable as a workflow artifact for 14 days.
-
-The CI also sets `CI=true`, so the local-only post-publish copy in the project file is not executed on GitHub runners.
+The workflow also sets `CI=true`, so the local-only post-publish copy step is not executed on GitHub runners.
 
 ## Data and locales
 
@@ -167,7 +165,7 @@ The CI also sets `CI=true`, so the local-only post-publish copy in the project f
 ├── config.json
 ├── debug.log
 ├── config\
-│   └── <content-state>.txt
+│   └── <content>__monitor_<monitor>.txt
 └── locales\
     ├── en.txt
     ├── ru.txt
@@ -179,7 +177,7 @@ The CI also sets `CI=true`, so the local-only post-publish copy in the project f
     └── ar.txt
 ```
 
-Localization files use simple `key=value` pairs. Additional languages can be added through the same format.
+Locale files are plain `key=value` text files. The first run asks for a language and saves the choice in `config.json`.
 
 ## License
 
