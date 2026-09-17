@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   repair:
-    if: ${{ !contains(github.event.head_commit.message, 'AUTO-FIX OVERLAY STATE') && !contains(github.event.head_commit.message, 'Remove temporary overlay state workflow') }}
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -21,12 +20,13 @@ jobs:
           dotnet-version: '10.0.x'
           cache: false
 
-      - name: Patch legacy state handling
+      - name: Patch and build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $path = 'Program.cs'
           $text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+
           $needle = @'
                 int h = int.Parse(lines[4]);
 
@@ -35,10 +35,9 @@ jobs:
           $replacement = @'
                 int h = int.Parse(lines[4]);
 
-                // These exact coordinates are the obsolete centered/offset defaults from
-                // the previous WebOverlay host. They are configuration artifacts, not
-                // user-customized positions, so make the current URL-specific defaults win
-                // once and persist the corrected geometry.
+                // These exact coordinates are obsolete centered/offset defaults from the
+                // previous WebOverlay host. Treat them as missing so current URL-specific
+                // defaults are applied once and persisted.
                 if (IsLegacyDefaultState(x, y, w, h))
                 {
                     Log($"TryLoadStateFile: ignoring legacy default for {url}: X={x}, Y={y}, size={w}x{h}");
@@ -47,8 +46,6 @@ jobs:
 
                 Location = new Point(x, y);
 '@
-          if (-not $text.Contains($needle)) { throw 'TryLoadStateFile insertion marker not found.' }
-          $text = $text.Replace($needle, $replacement)
 
           $marker = @'
         private void ApplyDefaultState()
@@ -66,25 +63,27 @@ jobs:
         }
 
 '@
-          if (-not $text.Contains($marker)) { throw 'ApplyDefaultState marker not found.' }
-          $text = $text.Replace($marker, $helper + $marker)
 
-          [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
+          if (-not $text.Contains('IsLegacyDefaultState(int x, int y, int w, int h)')) {
+              if (-not $text.Contains($needle)) { throw 'TryLoadStateFile insertion marker not found.' }
+              if (-not $text.Contains($marker)) { throw 'ApplyDefaultState marker not found.' }
+              $text = $text.Replace($needle, $replacement)
+              $text = $text.Replace($marker, $helper + $marker)
+              [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
+          }
+
           git diff --check
-          git diff -- Program.cs
+          dotnet restore WebOverlay.csproj
+          dotnet build WebOverlay.csproj --configuration Release --no-restore --nologo
 
-      - name: Build
-        shell: pwsh
-        run: dotnet build WebOverlay.csproj --configuration Release --no-restore --nologo
-
-      - name: Commit and remove workflow
+      - name: Apply one-time commit
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Program.cs
-          git commit -m 'AUTO-FIX OVERLAY STATE: migrate legacy default positions'
           git rm .github/workflows/tmp-state-config-fix.yml
-          git commit -m 'Remove temporary overlay state workflow'
+          git diff --cached --check
+          git commit -m 'Fix legacy WebOverlay default positions'
           git push
