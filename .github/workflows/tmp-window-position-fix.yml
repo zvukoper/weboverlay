@@ -28,12 +28,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $path = 'Program.cs'
           $text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
-          $old = 'FormBorderStyle = FormBorderStyle.None;'
-          $new = $old + [Environment]::NewLine + '            StartPosition = FormStartPosition.Manual;'
-          $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
-          if ($count -ne 1) { throw "Expected exactly one OverlayForm FormBorderStyle initializer, found $count." }
-          $text = $text.Replace($old, $new)
-          [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
+          if ($text.Contains('StartPosition = FormStartPosition.Manual;')) {
+              Write-Host 'StartPosition=Manual is already present; nothing to patch.'
+          } else {
+              $pattern = '(?s)(private void InitializeForm\(\)\s*\{\s*FormBorderStyle\s*=\s*FormBorderStyle\.None;)'
+              if (-not [regex]::IsMatch($text, $pattern)) { throw 'InitializeForm/FormBorderStyle marker not found.' }
+              $text = [regex]::Replace($text, $pattern, '$1' + [Environment]::NewLine + '            StartPosition = FormStartPosition.Manual;', 1)
+              [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
+          }
           git diff --check
           git diff -- Program.cs
       - name: Build
