@@ -9,10 +9,6 @@ function Replace-Once([string]$Text, [string]$Pattern, [string]$Replacement, [st
 $path = 'Program.cs'
 $text = Get-Content -Raw -Encoding UTF8 $path
 
-# ---------------------------------------------------------------------------
-# Single-instance commands: append creates a second window; close closes one
-# URL only. No command may replace/navigate an existing HUD window.
-# ---------------------------------------------------------------------------
 $text = Replace-Once $text '                string url = null;\s*\r?\n                bool append = false;\s*\r?\n' @'
                 string url = null;
                 bool append = false;
@@ -46,9 +42,6 @@ $text = Replace-Once $text '(?s)                if \(!createdNew\)\s*\{\s*if \(!
 $marker = '                _appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay");'
 $text = $text.Replace($marker, '                if (close)' + [Environment]::NewLine + '                    return;' + [Environment]::NewLine + [Environment]::NewLine + $marker)
 
-# ---------------------------------------------------------------------------
-# Targeted URL close command in WindowManager + pipe support.
-# ---------------------------------------------------------------------------
 $closeMethod = @'
         public static bool CloseWindowByUrl(string targetUrl)
         {
@@ -66,24 +59,12 @@ $closeMethod = @'
 '@
 $text = Replace-Once $text '        public static void ToggleClickableActive\(\)' ($closeMethod + '        public static void ToggleClickableActive()') 'CloseWindowByUrl'
 
-$oldPipe = @'
+$pipePattern = '(?s)                                // All external launches create independent overlay windows\..*?\s*Log\(\$"Создано новое окно с URL: \{pipeUrl\} \(не активное\)"\);'
+$pipeReplacement = @'
                                 if (command == "append")
                                 {
                                     WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
-                                }
-                                else if (command == "replace")
-                                {
-                                    var active = WindowManager.ActiveWindow;
-                                    if (active != null)
-                                        active.NavigateToUrl(pipeUrl);
-                                    else
-                                        WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, true);
-                                }
-'@
-$newPipe = @'
-                                if (command == "append")
-                                {
-                                    WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
+                                    Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
                                 }
                                 else if (command == "close")
                                 {
@@ -91,20 +72,12 @@ $newPipe = @'
                                     Log($"Pipe close url={pipeUrl} closed={closed}");
                                 }
 '@
-if (-not $text.Contains($oldPipe)) { throw 'Pipe command block not found' }
-$text = $text.Replace($oldPipe, $newPipe)
+$text = Replace-Once $text $pipePattern $pipeReplacement 'pipe append/close commands'
 
-# Give each native overlay a useful title. MainForm no longer needs to inspect
-# Process.MainWindowTitle because AR lifecycle uses the targeted close command.
 $text = $text.Replace('            FormBorderStyle = FormBorderStyle.None;' + [Environment]::NewLine + '            TopMost = true;', '            FormBorderStyle = FormBorderStyle.None;' + [Environment]::NewLine + '            Text = GetContentName();' + [Environment]::NewLine + '            TopMost = true;')
 $text = $text.Replace('            url = newUrl;' + [Environment]::NewLine + '            LoadState();', '            url = newUrl;' + [Environment]::NewLine + '            Text = GetContentName();' + [Environment]::NewLine + '            LoadState();')
 
-# ---------------------------------------------------------------------------
-# Special fullscreen layers are native click-through until explicitly enabled.
-# Quest UI sends set_clickable=true only while the game is paused.
-# ---------------------------------------------------------------------------
 $text = $text.Replace('            _clickable = config.Clickable;' + [Environment]::NewLine, '            _clickable = IsSpecialClickThroughUrl(url) ? false : config.Clickable;' + [Environment]::NewLine)
-
 $specialHelper = @'
         private static bool IsSpecialClickThroughUrl(string value)
         {
@@ -183,11 +156,6 @@ $newWebMsg = @'
 if (-not $text.Contains($oldWebMsg)) { throw 'WebMessageReceived block not found' }
 $text = $text.Replace($oldWebMsg, $newWebMsg)
 
-# ---------------------------------------------------------------------------
-# Remove all remaining per-monitor state code. State remains one file per URL.
-# Existing old __monitor_*.txt files are ignored; the caller migrates selected
-# known defaults before launch.
-# ---------------------------------------------------------------------------
 $text = Replace-Once $text '(?s)        private string GetLegacyMonitorStateFilePath\(\).*?        private static string GetSafeFilePart' '        private static string GetSafeFilePart' 'legacy monitor state helper'
 $text = Replace-Once $text '(?s)        private static string GetSafeFilePart\(string value\)\s*\{.*?        private void LoadState\(\)' @'
         private static string GetSafeFilePart(string value)
@@ -227,9 +195,6 @@ $newLoad = @'
 if (-not $text.Contains($oldLoad)) { throw 'LoadState monitor block not found' }
 $text = $text.Replace($oldLoad, $newLoad)
 
-# ---------------------------------------------------------------------------
-# Defaults. Functional full-screen layers occupy the entire primary desktop.
-# ---------------------------------------------------------------------------
 $applyPattern = '(?s)        private void ApplyDefaultState\(\).*?\n        \}\n\n        private void SaveState\(\)'
 $applyReplacement = @'
         private void ApplyDefaultState()
@@ -314,7 +279,6 @@ $text = Replace-Once $text $applyPattern $applyReplacement 'ApplyDefaultState'
 
 Set-Content -Path $path -Value $text -Encoding UTF8
 
-# Validation before committing.
 $verify = Get-Content -Raw -Encoding UTF8 Program.cs
 if ($verify -match 'MoveToNextMonitor|GetMonitorKey|__monitor_') { throw 'Multi-monitor runtime/state support remains' }
 if ($verify -notmatch 'CloseWindowByUrl') { throw 'CloseWindowByUrl missing' }
