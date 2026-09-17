@@ -12,8 +12,8 @@ namespace WebOverlay
 {
     /// <summary>
     /// Keeps the transparent WebOverlay pages on one native colour-key path.
-    /// Clickability is controlled only by WS_EX_TRANSPARENT + Form.Enabled;
-    /// the layered window and colour key remain intact in both states.
+    /// Clickability is controlled only by WS_EX_TRANSPARENT; the layered window
+    /// and colour key remain intact in both states.
     /// </summary>
     internal static class OverlayTransparencyFix
     {
@@ -45,7 +45,7 @@ namespace WebOverlay
 
             try
             {
-                _timer = new Timer { Interval = 250 };
+                _timer = new Timer { Interval = 50 };
                 _timer.Tick += (_, _) => ApplyToTransparentWindows();
                 _timer.Start();
                 ApplyToTransparentWindows();
@@ -162,8 +162,12 @@ namespace WebOverlay
                 255,
                 LWA_COLORKEY);
 
-            if (window.Enabled != clickable)
-                window.Enabled = clickable;
+            // Never disable the native form for click-through. Form.Enabled=false
+            // makes WebView focus/cursor state unstable and is unrelated to
+            // mouse hit-testing, which is handled by WS_EX_TRANSPARENT and
+            // OverlayForm.WndProc(HTTRANSPARENT).
+            if (!window.Enabled)
+                window.Enabled = true;
 
             if (changed)
             {
