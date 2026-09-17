@@ -1,0 +1,29 @@
+name: Run single-screen source patch
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        shell: pwsh
+        run: ./tools/apply-single-monitor-and-targeted-close.ps1
+      - name: Publish validation
+        shell: pwsh
+        run: dotnet publish WebOverlay.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o obj\ci-publish --nologo
+      - name: Commit source and remove patch files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Program.cs tools/apply-single-monitor-and-targeted-close.ps1 .github/workflows/run-single-screen-source-patch.yml
+          git commit -m 'Fix single-screen overlay state and targeted window close'
+          git push
+          git rm tools/apply-single-monitor-and-targeted-close.ps1 .github/workflows/run-single-screen-source-patch.yml
+          git commit -m 'Remove temporary single-screen patch files'
+          git push
