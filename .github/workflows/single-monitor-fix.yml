@@ -1,0 +1,338 @@
+name: Fix WebOverlay single-monitor mode
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch Program.cs and HelpPage.cs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Replace-Once([string]$Text, [string]$Pattern, [string]$Replacement, [string]$Name) {
+              $new = [regex]::Replace($Text, $Pattern, $Replacement, [Text.RegularExpressions.RegexOptions]::Singleline)
+              if ($new -eq $Text) { throw "Pattern not found: $Name" }
+              return $new
+          }
+
+          $path = 'Program.cs'
+          $text = Get-Content -Raw -Encoding UTF8 $path
+
+          $text = $text.Replace('        public string MoveMonitor { get; set; } = "Ctrl+Shift+Alt+Oem5";' + [Environment]::NewLine, '')
+
+          $text = Replace-Once $text '(?s)\s*public static void MoveActiveToNextMonitor\(\)\s*\{\s*ActiveWindow\?\.MoveToNextMonitor\(\);\s*\}' '' 'WindowManager.MoveActiveToNextMonitor'
+
+          $oldSecondInstance = @'
+                if (!createdNew)
+                {
+                    if (!string.IsNullOrEmpty(url))
+                    {
+                        SendCommandToExistingInstance((append ? "append" : "replace") + "|" + url);
+                    }
+                    return;
+                }
+'@
+          $newSecondInstance = @'
+                if (!createdNew)
+                {
+                    if (!string.IsNullOrEmpty(url))
+                    {
+                        // A second launch must always create another overlay window.
+                        // Never replace/navigate an already visible HUD window.
+                        SendCommandToExistingInstance("append|" + url);
+                    }
+                    return;
+                }
+'@
+          if (-not $text.Contains($oldSecondInstance)) { throw 'Second-instance startup block not found' }
+          $text = $text.Replace($oldSecondInstance, $newSecondInstance)
+
+          $text = $text.Replace('        private bool _monitorHotkeyArmed;' + [Environment]::NewLine, '')
+          $text = $text.Replace('        private Keys _monitorHotkeyKey = Keys.None;' + [Environment]::NewLine, '')
+          $text = $text.Replace('            KeyUp += OnKeyUp;' + [Environment]::NewLine, '')
+          $text = $text.Replace('            webView.KeyUp += (s, e) => OnKeyUp(s, e);' + [Environment]::NewLine, '')
+          $text = $text.Replace('            // Monitor hotkey: arm on press, execute once on release.' + [Environment]::NewLine + '            if (TryArmMonitorHotkey(e))' + [Environment]::NewLine + '                return;' + [Environment]::NewLine + [Environment]::NewLine, '')
+
+          $text = Replace-Once $text '(?s)\s*public void MoveToNextMonitor\(\)\s*\{.*?\n        \}\n\n        public void UpdateManipulationInfo' "`r`n        public void UpdateManipulationInfo" 'OverlayForm.MoveToNextMonitor'
+
+          $text = Replace-Once $text '(?s)\s*private void OnKeyUp\(object sender, KeyEventArgs e\)\s*\{.*?\n        \}\n\n        private bool TryArmMonitorHotkey' "`r`n        private bool TryArmMonitorHotkey" 'OverlayForm.OnKeyUp'
+          $text = Replace-Once $text '(?s)\s*private bool TryArmMonitorHotkey\(KeyEventArgs e\)\s*\{.*?\n        \}' '' 'OverlayForm.TryArmMonitorHotkey'
+
+          $stateReplacement = @'
+
+        private string GetStateFilePath()
+        {
+            string safe = GetSafeFilePart(url ?? "WebOverlay");
+            return Path.Combine(configDir, safe + ".txt");
+        }
+
+        private string GetLegacyMonitorStateFilePath()
+        {
+            string safe = GetSafeFilePart(url ?? "WebOverlay");
+            try
+            {
+                Screen current = Screen.FromHandle(Handle);
+                string monitorKey = GetMonitorKey(current);
+                string preferred = Path.Combine(configDir, safe + "__monitor_" + monitorKey + ".txt");
+                if (File.Exists(preferred))
+                    return preferred;
+            }
+            catch { }
+
+            try
+            {
+                return Directory.GetFiles(configDir, safe + "__monitor_*.txt")
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string GetSafeFilePart(string value)
+        {
+            string safe = string.Join("_", value.Split(Path.GetInvalidFileNameChars()));
+            if (safe.Length > 180)
+                safe = safe[..180];
+            return safe;
+        }
+
+        private static string GetMonitorKey(Screen monitor)
+        {
+            string name = monitor?.DeviceName ?? "PRIMARY";
+            var chars = name.Where(char.IsLetterOrDigit).ToArray();
+            return chars.Length == 0 ? "PRIMARY" : new string(chars);
+        }
+
+        private static Screen GetDefaultEts2Screen()
+        {
+            try
+            {
+                var processes = Process.GetProcessesByName("eurotrucks2");
+                foreach (var process in processes)
+                {
+                    try
+                    {
+                        if (process.MainWindowHandle != IntPtr.Zero)
+                            return Screen.FromHandle(process.MainWindowHandle);
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }
+            }
+            catch { }
+
+            return Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
+        }
+
+        private void LoadState()
+        {
+            _stateApplying = true;
+            try
+            {
+                if (!TryLoadStateFile(GetStateFilePath()))
+                {
+                    string legacy = GetLegacyMonitorStateFilePath();
+                    if (!string.IsNullOrEmpty(legacy) && TryLoadStateFile(legacy))
+                    {
+                        SaveState();
+                        Log($"LoadState: migrated legacy monitor state {legacy} -> {GetStateFilePath()}");
+                    }
+                    else
+                    {
+                        ApplyDefaultState();
+                        SaveState();
+                    }
+                }
+            }
+            finally
+            {
+                _stateApplying = false;
+                _stateDirty = false;
+            }
+        }
+
+        private bool TryLoadStateFile(string path)
+        {
+            if (!File.Exists(path))
+                return false;
+
+            try
+            {
+                string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+                if (lines.Length < 5)
+                    return false;
+
+                int x = int.Parse(lines[0]);
+                int y = int.Parse(lines[1]);
+                double zoom = double.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture);
+                int w = int.Parse(lines[3]);
+                int h = int.Parse(lines[4]);
+
+                Location = new Point(x, y);
+                _zoomFactor = Math.Clamp(zoom, 0.3, 3.0);
+                Size = new Size(Math.Max(100, w), Math.Max(100, h));
+                if (webView != null)
+                    webView.ZoomFactor = _zoomFactor;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"LoadState ошибка: {ex.Message}");
+                return false;
+            }
+        }
+
+        private void ApplyDefaultState()
+        {
+            _zoomFactor = 1.0;
+
+            var screen = Screen.PrimaryScreen;
+            if (screen == null)
+            {
+                Size = new Size(800, 600);
+                Location = new Point(100, 100);
+                Log($"ApplyDefaultState: no primary screen, fallback 800x600 at 100,100 for {url}");
+                return;
+            }
+
+            var area = screen.WorkingArea;
+            string normalizedUrl = (url ?? string.Empty).ToLowerInvariant();
+
+            // Help page keeps its existing dedicated layout.
+            if (normalizedUrl.Contains("help.html"))
+            {
+                Size = new Size(800, 1000);
+                int x = Math.Min(area.Right - Width, area.Left + 560);
+                int y = area.Top + 15;
+                Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
+            }
+            // PDA / minimap: square, bottom-left, 30% of working-area height.
+            else if (normalizedUrl.Contains("web_pda_map.html"))
+            {
+                int side = Math.Max(100, (int)Math.Round(area.Height * 0.30));
+                side = Math.Min(side, Math.Min(area.Width, area.Height));
+                Size = new Size(side, side);
+                Location = new Point(area.Left, area.Bottom - side);
+            }
+            // Hybrid UI: 42% of screen width, 32% of screen height, bottom-centre.
+            else if (normalizedUrl.Contains("web_ui_hybrid.html"))
+            {
+                int width = Math.Max(100, (int)Math.Round(area.Width * 0.42));
+                int height = Math.Max(100, (int)Math.Round(area.Height * 0.32));
+                width = Math.Min(width, area.Width);
+                height = Math.Min(height, area.Height);
+                int x = area.Left + (area.Width - width) / 2;
+                int y = area.Bottom - height;
+                Size = new Size(width, height);
+                Location = new Point(x, y);
+            }
+            // Pause mini-logo: square, top-right, 18% of working-area height.
+            else if (normalizedUrl.Contains("web_pause_logo.html"))
+            {
+                int side = Math.Max(100, (int)Math.Round(area.Height * 0.18));
+                side = Math.Min(side, Math.Min(area.Width, area.Height));
+                Size = new Size(side, side);
+                Location = new Point(area.Right - side, area.Top);
+            }
+            // Heights/debug view retains the documented top-right layout.
+            else if (normalizedUrl.Contains("web_heights.html"))
+            {
+                int width = Math.Max(100, (int)Math.Round(area.Width * 0.34));
+                int height = Math.Max(100, (int)Math.Round(area.Height * 0.30));
+                width = Math.Min(width, area.Width);
+                height = Math.Min(height, area.Height);
+                Size = new Size(width, height);
+                Location = new Point(area.Right - width, area.Top);
+            }
+            else
+            {
+                Size = new Size(800, 600);
+                int x = area.Left + Math.Max(0, (area.Width - Width) / 2);
+                int y = area.Top + Math.Max(0, (area.Height - Height) / 2);
+                Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
+            }
+
+            if (webView != null)
+                webView.ZoomFactor = _zoomFactor;
+
+            Log($"ApplyDefaultState: url={url}, location={Location.X},{Location.Y}, size={Width}x{Height}");
+        }
+
+        private void SaveState()
+        {
+            try
+            {
+                Directory.CreateDirectory(configDir);
+                File.WriteAllLines(GetStateFilePath(), new[]
+                {
+                    Location.X.ToString(),
+                    Location.Y.ToString(),
+                    _zoomFactor.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Width.ToString(),
+                    Height.ToString()
+                }, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Log($"SaveState ошибка: {ex.Message}");
+            }
+        }
+'@
+
+          $text = Replace-Once $text '(?s)\s*private string GetStateFilePath\(\).*?\s*protected override void WndProc\(ref Message m\)' $stateReplacement + "`r`n        protected override void WndProc(ref Message m)" 'single-monitor state storage'
+
+          $text = Replace-Once $text '(?s)\s*Screen screen;\s*try \{ screen = Screen.FromHandle\(Handle\); \}\s*catch \{ screen = Screen.PrimaryScreen; \}\s*\r?\n\s*int monitorIndex = Array.FindIndex\(Screen\.AllScreens, s => s\.DeviceName == screen\.DeviceName\) \+ 1;\s*\r?\n\s*if \(monitorIndex <= 0\)\s*monitorIndex = 1;\s*\r?\n\s*string title = GetContentName\(\);\s*string text = \$"\{title\} \\| \{Width\}x\{Height\} \\| zoom \{_zoomFactor \* 100:0\}% \\| X:\{Left\} Y:\{Top\} \\| bounds \{Left\},\{Top\}-\{Right\},\{Bottom\} \\| monitor \{monitorIndex\}/\{Screen\.AllScreens\.Length\} \\| click \{\( _clickable \? "ON" : "OFF"\)\}";?' '' 'monitor info text'
+          $text = $text.Replace('            Screen screen;`r`n', '')
+          $text = $text.Replace('            Screen screen;' + [Environment]::NewLine, '')
+
+          $helpPath = 'HelpPage.cs'
+          $help = Get-Content -Raw -Encoding UTF8 $helpPath
+          $help = $help.Replace('        string monitor = config.MoveMonitor;' + [Environment]::NewLine, '')
+          $help = $help.Replace('        <li><kbd>{monitor}</kbd> — {Localization.Get("MoveMonitorDesc", "move active window to next monitor")}</li>' + [Environment]::NewLine, '')
+          $help = $help.Replace('        <li><kbd>{monitor}</kbd> — {Localization.Get("MoveMonitorDesc", "move active window to next monitor")}</li>', '')
+
+          Set-Content -Path $path -Value $text -Encoding UTF8
+          Set-Content -Path $helpPath -Value $help -Encoding UTF8
+
+      - name: Validate source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $program = Get-Content -Raw -Encoding UTF8 Program.cs
+          $help = Get-Content -Raw -Encoding UTF8 HelpPage.cs
+          if ($program -match 'MoveMonitor|MoveToNextMonitor|_monitorHotkeyArmed|_monitorHotkeyKey|__monitor_') { throw 'Multi-monitor runtime support remains in Program.cs' }
+          if ($program -match 'GetStateFilePath\(Screen monitor\)|SaveStateForMonitor|LoadStateForMonitor') { throw 'Per-monitor state methods remain' }
+          if ($help -match 'MoveMonitor|MoveMonitorDesc') { throw 'Monitor hotkey remains in HelpPage.cs' }
+          if ($program -notmatch 'SendCommandToExistingInstance\("append\|" \+ url\)') { throw 'Second instance is not append-only' }
+          if ($program -notmatch 'web_pda_map\.html' -or $program -notmatch 'web_ui_hybrid\.html' -or $program -notmatch 'web_pause_logo\.html') { throw 'URL defaults missing' }
+
+      - name: Publish
+        shell: pwsh
+        run: dotnet publish WebOverlay.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o obj\ci-publish --nologo
+
+      - name: Commit source fix and remove workflow
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Program.cs HelpPage.cs .github/workflows/single-monitor-fix.yml
+          git commit -m 'Simplify WebOverlay to single monitor and preserve overlay windows'
+          git push
+          git rm .github/workflows/single-monitor-fix.yml
+          git commit -m 'Remove temporary single-monitor migration workflow'
+          git push
