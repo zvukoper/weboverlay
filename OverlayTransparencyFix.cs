@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Reflection;
@@ -10,15 +11,15 @@ using Microsoft.Web.WebView2.WinForms;
 namespace WebOverlay
 {
     /// <summary>
-    /// Keeps WebView2 overlay pages on the same colour-key transparency path.
-    /// The host window, WebView2 default background and transparent HTML areas
-    /// all use Color.Lime; the host then removes that exact colour with
-    /// LWA_COLORKEY. This prevents WebView2 from exposing the lime host colour
-    /// through transparent HTML content.
+    /// Keeps WebView2 overlay pages transparent while respecting the current
+    /// clickability mode. Click-through windows use Win32 colour-key layering;
+    /// clickable windows must not be forced back onto the layered path because
+    /// that makes the lime chroma-key background visible.
     /// </summary>
     internal static class OverlayTransparencyFix
     {
         private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
         private const int WS_EX_LAYERED = 0x00080000;
         private const int LWA_COLORKEY = 0x00000001;
         private const int SWP_NOMOVE = 0x0002;
@@ -27,8 +28,11 @@ namespace WebOverlay
 
         private static readonly FieldInfo? WebViewField =
             typeof(OverlayForm).GetField("webView", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo? ClickableField =
+            typeof(OverlayForm).GetField("_clickable", BindingFlags.Instance | BindingFlags.NonPublic);
 
         private static Timer? _timer;
+        private static readonly Dictionary<IntPtr, bool> LastClickable = new();
 
         [ModuleInitializer]
         internal static void Initialize()
@@ -42,7 +46,7 @@ namespace WebOverlay
 
             try
             {
-                _timer = new Timer { Interval = 250 };
+                _timer = new Timer { Interval = 50 };
                 _timer.Tick += (_, _) => ApplyToTransparentWindows();
                 _timer.Start();
                 ApplyToTransparentWindows();
@@ -85,38 +89,90 @@ namespace WebOverlay
                    normalized.Contains("web_ar_hud.html");
         }
 
+        private static bool GetClickable(OverlayForm window)
+        {
+            try
+            {
+                return ClickableField?.GetValue(window) is bool value && value;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static WebView2? GetWebView(OverlayForm window)
+        {
+            try
+            {
+                return WebViewField?.GetValue(window) as WebView2;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static void Apply(OverlayForm window)
         {
-            // The same key colour must be used by the native host and WebView2.
+            bool clickable = GetClickable(window);
+            bool changed = !LastClickable.TryGetValue(window.Handle, out bool previous) || previous != clickable;
+            LastClickable[window.Handle] = clickable;
+
             window.BackColor = Color.Lime;
             window.TransparencyKey = Color.Lime;
 
             try
             {
-                if (WebViewField?.GetValue(window) is WebView2 view)
-                    view.DefaultBackgroundColor = Color.Lime;
+                var view = GetWebView(window);
+                if (view != null)
+                    view.DefaultBackgroundColor = clickable ? Color.Transparent : Color.Lime;
             }
             catch (Exception ex)
             {
-                Program.Log($"OverlayTransparencyFix WebView2 background error: {ex.Message}");
+                if (changed)
+                    Program.Log($"OverlayTransparencyFix WebView2 background error: {ex.Message}");
             }
 
             int exStyle = GetWindowLong(window.Handle, GWL_EXSTYLE);
-            if ((exStyle & WS_EX_LAYERED) == 0)
+            int desiredStyle;
+
+            if (clickable)
             {
-                exStyle |= WS_EX_LAYERED;
-                SetWindowLong(window.Handle, GWL_EXSTYLE, exStyle);
-                SetWindowPos(window.Handle, IntPtr.Zero, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
-                Program.Log($"OverlayTransparencyFix: enabled layered transparency for {window.Url}");
+                // Clickable overlays must not be kept as WS_EX_LAYERED by this
+                // helper. The previous implementation re-added WS_EX_LAYERED
+                // every 250 ms, immediately undoing ToggleClickable and leaving
+                // the lime host background visible.
+                desiredStyle = exStyle & ~(WS_EX_TRANSPARENT | WS_EX_LAYERED);
+            }
+            else
+            {
+                // Click-through overlays need the native layered colour-key path.
+                desiredStyle = exStyle | WS_EX_TRANSPARENT | WS_EX_LAYERED;
             }
 
-            // Explicit Win32 colour key. All non-key pixels remain fully opaque.
-            SetLayeredWindowAttributes(
-                window.Handle,
-                ColorTranslator.ToWin32(Color.Lime),
-                255,
-                LWA_COLORKEY);
+            if (desiredStyle != exStyle)
+            {
+                SetWindowLong(window.Handle, GWL_EXSTYLE, desiredStyle);
+                SetWindowPos(window.Handle, IntPtr.Zero, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+            }
+
+            if (!clickable)
+            {
+                SetLayeredWindowAttributes(
+                    window.Handle,
+                    ColorTranslator.ToWin32(Color.Lime),
+                    255,
+                    LWA_COLORKEY);
+            }
+
+            if (changed)
+            {
+                Program.Log($"OverlayTransparencyFix: {window.Url} clickable={clickable} style={(clickable ? \"normal\" : \"layered-colorkey\")}");
+            }
+
+            window.Invalidate();
         }
 
         [DllImport("user32.dll", SetLastError = true)]
