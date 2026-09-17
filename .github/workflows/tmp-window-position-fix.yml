@@ -1,0 +1,56 @@
+name: One-time WebOverlay window position fix
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: ${{ !contains(github.event.head_commit.message, 'AUTO-FIX WINDOW POSITION') && !contains(github.event.head_commit.message, 'Remove temporary window position workflow') }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+          cache: false
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore WebOverlay.csproj
+
+      - name: Patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'Program.cs'
+          $text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+          $old = 'FormBorderStyle = FormBorderStyle.None;'
+          $new = 'FormBorderStyle = FormBorderStyle.None,`r`n            StartPosition = FormStartPosition.Manual;'
+          if (([regex]::Matches($text, [regex]::Escape($old))).Count -ne 1) { throw 'Expected exactly one OverlayForm FormBorderStyle initializer.' }
+          $text = $text.Replace($old, $new)
+          [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
+          git diff --check
+          git diff -- Program.cs
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build WebOverlay.csproj --configuration Release --no-restore
+
+      - name: Commit and remove workflow
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Program.cs
+          git commit -m 'AUTO-FIX WINDOW POSITION: honor explicit overlay coordinates'
+          git rm .github/workflows/tmp-window-position-fix.yml
+          git commit -m 'Remove temporary window position workflow'
+          git push
