@@ -16,29 +16,24 @@ function Replace-Exact([string]$Text, [string]$Old, [string]$New, [string]$Name)
 $path = 'Program.cs'
 $text = Get-Content -Raw -Encoding UTF8 $path
 
-# ---------------------------------------------------------------------------
-# Single instance command line:
-# - normal/append launch => append a new window
-# - close <url>          => close only the window for that URL
-# ---------------------------------------------------------------------------
-$text = Replace-Exact $text '                string url = null;`r`n                bool append = false;`r`n' '                string url = null;`r`n                bool append = false;`r`n                bool close = false;`r`n' 'command flags'
-$text = Replace-Exact $text @'
-                    else if (!arg.StartsWith("-"))
-                    {
-                        url = arg;
-                    }
-'@ @'
-                    else if (arg.Equals("close", StringComparison.OrdinalIgnoreCase) || arg.Equals("-close", StringComparison.OrdinalIgnoreCase))
+# --- command-line parsing and single-instance routing ----------------------
+$parseStart = $text.IndexOf('                string url = null;', [StringComparison]::Ordinal)
+if ($parseStart -lt 0) { throw 'Main argument parser start not found' }
+$appendEnd = $text.IndexOf('                    else if (!arg.StartsWith("-"))', $parseStart, [StringComparison]::Ordinal)
+if ($appendEnd -lt 0) { throw 'Main argument parser marker not found' }
+$appendMarkerEnd = $appendEnd
+$parsePrefix = $text.Substring(0, $appendMarkerEnd)
+if ($parsePrefix.IndexOf('bool close = false;', [StringComparison]::Ordinal) -lt 0)
+{
+    $text = $text.Insert($appendMarkerEnd, '                bool close = false;' + [Environment]::NewLine)
+}
+$text = Replace-Exact $text '                    else if (!arg.StartsWith("-"))' '                    else if (arg.Equals("close", StringComparison.OrdinalIgnoreCase) || arg.Equals("-close", StringComparison.OrdinalIgnoreCase))
                     {
                         close = true;
                         if (i + 1 < args.Length)
                             url = args[++i];
                     }
-                    else if (!arg.StartsWith("-"))
-                    {
-                        url = arg;
-                    }
-'@ 'close argument parser'
+                    else if (!arg.StartsWith("-"))' 'close argument parser'
 
 $text = Replace-Between $text '                if (!createdNew)' '                _appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay");' @'
                 if (!createdNew)
@@ -48,17 +43,12 @@ $text = Replace-Between $text '                if (!createdNew)' '              
                     return;
                 }
 
-'@ 'second-instance handler'
-
-# A close request received as a first process has nothing to do.
-$text = Replace-Exact $text '                _appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay");' '                if (close)
+                if (close)
                     return;
 
-                _appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay");' 'first-process close guard'
+'@ 'single instance handler'
 
-# ---------------------------------------------------------------------------
-# WindowManager targeted close.
-# ---------------------------------------------------------------------------
+# --- target one window by URL ----------------------------------------------
 $closeMethod = @'
         public static bool CloseWindowByUrl(string targetUrl)
         {
@@ -74,45 +64,49 @@ $closeMethod = @'
         }
 
 '@
-$text = Replace-Exact $text '        public static void ToggleClickableActive()' ($closeMethod + '        public static void ToggleClickableActive()') 'CloseWindowByUrl method'
+$text = Replace-Exact $text '        public static void ToggleClickableActive()' ($closeMethod + '        public static void ToggleClickableActive()') 'CloseWindowByUrl'
 
-# Pipe handler: append creates a window, close closes only that URL. No replace path.
-$pipeAppend = @'
-                                WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
-                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
-'@
-$pipeWithClose = @'
-                                WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
-                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
+$pipeReplacement = @'
+                        string command = parts[0];
+                        string pipeUrl = parts[1];
+                        _firstWindow.Invoke(new Action(() =>
+                        {
+                            try
+                            {
+                                if (command == "append")
+                                {
+                                    WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
+                                    Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
                                 }
                                 else if (command == "close")
                                 {
                                     bool closed = WindowManager.CloseWindowByUrl(pipeUrl);
                                     Log($"Pipe close url={pipeUrl} closed={closed}");
-'@
-if ($text.Contains($pipeAppend, [StringComparison]::Ordinal)) {
-    # Current source already has the if(command == append) wrapper. Insert close after its body instead.
-    $closeInsert = @'
                                 }
-                                else if (command == "close")
-                                {
-                                    bool closed = WindowManager.CloseWindowByUrl(pipeUrl);
-                                    Log($"Pipe close url={pipeUrl} closed={closed}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"Ошибка команды pipe: {ex.Message}");
+                            }
+                        }));
 '@
-    $text = Replace-Exact $text '                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");`r`n                            }' '                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");`r`n                                }`r`n                                else if (command == "close")`r`n                                {`r`n                                    bool closed = WindowManager.CloseWindowByUrl(pipeUrl);`r`n                                    Log($"Pipe close url={pipeUrl} closed={closed}");`r`n' 'pipe close handler'
-} else {
-    # Alternate source formatting: inject after the append block's Log line.
-    $text = Replace-Exact $text '                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");' '                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
-                                }
-                                else if (command == "close")
-                                {
-                                    bool closed = WindowManager.CloseWindowByUrl(pipeUrl);
-                                    Log($"Pipe close url={pipeUrl} closed={closed}");' 'pipe close handler fallback'
-}
+$text = Replace-Between $text '                        string[] parts = line.Split('|');' '                    }' @'
+                        string[] parts = line.Split('|');
+                        if (parts.Length != 2 || _firstWindow == null || _firstWindow.IsDisposed)
+                            continue;
 
-# ---------------------------------------------------------------------------
-# Overlay form defaults and special fullscreen click-through behavior.
-# ---------------------------------------------------------------------------
+'@ 'noop'
+# Restore the actual block from the exact current pipe method using its unique starting marker.
+$pipeStart = $text.IndexOf('                        string[] parts = line.Split('|');', [StringComparison]::Ordinal)
+$pipeInvoke = $text.IndexOf('                        _firstWindow.Invoke(new Action(() =>', $pipeStart, [StringComparison]::Ordinal)
+$pipeEnd = $text.IndexOf('                        }));', $pipeInvoke, [StringComparison]::Ordinal)
+if ($pipeStart -lt 0 -or $pipeInvoke -lt 0 -or $pipeEnd -lt 0) { throw 'Pipe handler markers not found' }
+$pipeEnd = $pipeEnd + '                        }));'.Length
+$prefix = $text.Substring(0, $pipeStart)
+$suffix = $text.Substring($pipeEnd)
+$text = $prefix + $pipeReplacement + $suffix
+
+# --- fullscreen special windows are click-through by default ----------------
 $text = Replace-Exact $text '            _clickable = config.Clickable;' '            _clickable = IsSpecialClickThroughUrl(url) ? false : config.Clickable;' 'special click-through initialization'
 $specialHelper = @'
         private static bool IsSpecialClickThroughUrl(string value)
@@ -127,22 +121,29 @@ $specialHelper = @'
 
 '@
 $text = Replace-Exact $text '        private void Log(string msg)' ($specialHelper + '        private void Log(string msg)') 'special click-through helper'
+$text = Replace-Exact $text '            FormBorderStyle = FormBorderStyle.None;
+            TopMost = true;' '            FormBorderStyle = FormBorderStyle.None;
+            Text = GetContentName();
+            TopMost = true;' 'window title'
+$text = Replace-Exact $text '            url = newUrl;
+            LoadState();' '            url = newUrl;
+            Text = GetContentName();
+            LoadState();' 'navigate title'
 
-$text = Replace-Exact $text '            FormBorderStyle = FormBorderStyle.None;`r`n            TopMost = true;' '            FormBorderStyle = FormBorderStyle.None;`r`n            Text = GetContentName();`r`n            TopMost = true;' 'overlay window title'
-$text = Replace-Exact $text '            url = newUrl;`r`n            LoadState();' '            url = newUrl;`r`n            Text = GetContentName();`r`n            LoadState();' 'navigation window title'
-
-# Web messages from quest overlay toggle native clickability while paused.
-$oldWebMessage = @'
-                        if (e.TryGetWebMessageAsString() == "toggle")
-                            WindowManager.ToggleLockMode();
-'@
-$newWebMessage = @'
+$webMessageStart = '                webView.CoreWebView2.WebMessageReceived += (s, e) =>'
+$webMessageEnd = '                webView.CoreWebView2.Navigate(url);'
+$webMessage = @'
+                webView.CoreWebView2.WebMessageReceived += (s, e) =>
+                {
+                    try
+                    {
                         string message = e.TryGetWebMessageAsString();
                         if (message == "toggle")
                         {
                             WindowManager.ToggleLockMode();
                             return;
                         }
+
                         if (!string.IsNullOrWhiteSpace(message) && message.StartsWith("{"))
                         {
                             var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(message);
@@ -153,10 +154,13 @@ $newWebMessage = @'
                                 SetNativeClickability(value.GetBoolean());
                             }
                         }
-'@
-$text = Replace-Exact $text $oldWebMessage $newWebMessage 'WebMessage clickability'
+                    }
+                    catch { }
+                };
 
-$clickableMethod = @'
+'@
+$text = Replace-Between $text $webMessageStart $webMessageEnd ($webMessage + $webMessageEnd) 'web message handler'
+$text = Replace-Exact $text '        private void SetClickThrough(bool enable)' @'
         public void SetNativeClickability(bool clickable)
         {
             if (url != null && url.Contains("web_quests.html", StringComparison.OrdinalIgnoreCase))
@@ -168,23 +172,17 @@ $clickableMethod = @'
             UpdateManipulationInfo();
         }
 
-'@
-$text = Replace-Exact $text '        private void SetClickThrough(bool enable)' ($clickableMethod + '        private void SetClickThrough(bool enable)') 'native clickability method'
+        private void SetClickThrough(bool enable)'@ 'native clickability method'
 
-# ---------------------------------------------------------------------------
-# Remove per-monitor state support. One file per URL only.
-# ---------------------------------------------------------------------------
-if ($text.Contains('        private string GetLegacyMonitorStateFilePath()')) {
-    $text = Replace-Between $text '        private string GetLegacyMonitorStateFilePath()' '        private static string GetSafeFilePart' '        private static string GetSafeFilePart' 'legacy monitor state helper'
+# --- one state file per URL; no monitor-keyed persistence -------------------
+if ($text.Contains('        private string GetLegacyMonitorStateFilePath()', [StringComparison]::Ordinal)) {
+    $text = Replace-Between $text '        private string GetLegacyMonitorStateFilePath()' '        private static string GetSafeFilePart' '        private static string GetSafeFilePart' 'remove legacy monitor state'
 }
-if ($text.Contains('        private static string GetMonitorKey(Screen monitor)')) {
-    $text = Replace-Between $text '        private static string GetMonitorKey(Screen monitor)' '        private void LoadState()' '        private void LoadState()' 'monitor key helper'
-}
-if ($text.Contains('        private static Screen GetDefaultEts2Screen()')) {
-    $text = Replace-Between $text '        private static Screen GetDefaultEts2Screen()' '        private void LoadState()' '        private void LoadState()' 'unused default game screen helper'
+if ($text.Contains('        private static string GetMonitorKey(Screen monitor)', [StringComparison]::Ordinal)) {
+    $text = Replace-Between $text '        private static string GetMonitorKey(Screen monitor)' '        private void LoadState()' '        private void LoadState()' 'remove monitor key'
 }
 
-$text = Replace-Between $text '        private void LoadState()' '        private bool TryLoadStateFile' @'
+$singleLoad = @'
         private void LoadState()
         {
             _stateApplying = true;
@@ -203,9 +201,10 @@ $text = Replace-Between $text '        private void LoadState()' '        privat
             }
         }
 
-'@ 'single URL state loading'
+'@
+$text = Replace-Between $text '        private void LoadState()' '        private bool TryLoadStateFile' $singleLoad 'single state load'
 
-$text = Replace-Between $text '        private void ApplyDefaultState()' '        private void SaveState()' @'
+$singleDefaults = @'
         private void ApplyDefaultState()
         {
             _zoomFactor = 1.0;
@@ -277,43 +276,19 @@ $text = Replace-Between $text '        private void ApplyDefaultState()' '      
 
             if (webView != null)
                 webView.ZoomFactor = _zoomFactor;
-
-            Log($"ApplyDefaultState: url={url}, location={Location.X},{Location.Y}, size={Width}x{Height}");
         }
 
-'@ 'single-screen defaults'
+'@
+$text = Replace-Between $text '        private void ApplyDefaultState()' '        private void SaveState()' $singleDefaults 'single-screen defaults'
 
-$text = Replace-Between $text '        private void SaveState()' '        protected override void WndProc' @'
-        private void SaveState()
-        {
-            try
-            {
-                Directory.CreateDirectory(configDir);
-                File.WriteAllLines(GetStateFilePath(), new[]
-                {
-                    Location.X.ToString(),
-                    Location.Y.ToString(),
-                    _zoomFactor.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    Width.ToString(),
-                    Height.ToString()
-                }, Encoding.UTF8);
-            }
-            catch (Exception ex)
-            {
-                Log($"SaveState ошибка: {ex.Message}");
-            }
-        }
-
-'@ 'single URL state saving'
-
-# Validate invariants.
-$verify = Get-Content -Raw -Encoding UTF8 Program.cs
+# --- final invariants -------------------------------------------------------
+$verify = $text
 if ($verify -match 'MoveToNextMonitor|GetMonitorKey|__monitor_') { throw 'Multi-monitor runtime/state support remains' }
 if ($verify -match 'GetLegacyMonitorStateFilePath|LoadStateForMonitor|SaveStateForMonitor') { throw 'Per-monitor state methods remain' }
 if ($verify -notmatch 'CloseWindowByUrl') { throw 'Targeted close support missing' }
-if ($verify -notmatch 'set_clickable') { throw 'Quest clickability support missing' }
 if ($verify -notmatch 'web_quests\.html' -or $verify -notmatch 'web_notifications\.html' -or $verify -notmatch 'web_ar_hud\.html') { throw 'Fullscreen URL handling missing' }
-if ($verify -notmatch 'area = screen\.Bounds') { throw 'Screen.Bounds defaults missing' }
+if ($verify -notmatch 'area = screen\.Bounds') { throw 'Screen.Bounds default geometry missing' }
+if ($verify -notmatch 'set_clickable') { throw 'Dynamic quest clickability missing' }
 
 Set-Content -Path $path -Value $text -Encoding UTF8
 Write-Host 'WebOverlay source patch applied and validated.'
