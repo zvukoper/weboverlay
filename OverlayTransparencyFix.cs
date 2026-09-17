@@ -11,10 +11,9 @@ using Microsoft.Web.WebView2.WinForms;
 namespace WebOverlay
 {
     /// <summary>
-    /// Keeps WebView2 overlay pages transparent while respecting the current
-    /// clickability mode. Click-through windows use Win32 colour-key layering;
-    /// clickable windows must not be forced back onto the layered path because
-    /// that makes the lime chroma-key background visible.
+    /// Keeps the transparent WebOverlay pages on one native colour-key path.
+    /// Clickability is controlled only by WS_EX_TRANSPARENT + Form.Enabled;
+    /// the layered window and colour key remain intact in both states.
     /// </summary>
     internal static class OverlayTransparencyFix
     {
@@ -46,7 +45,7 @@ namespace WebOverlay
 
             try
             {
-                _timer = new Timer { Interval = 50 };
+                _timer = new Timer { Interval = 250 };
                 _timer.Tick += (_, _) => ApplyToTransparentWindows();
                 _timer.Start();
                 ApplyToTransparentWindows();
@@ -119,14 +118,18 @@ namespace WebOverlay
             bool changed = !LastClickable.TryGetValue(window.Handle, out bool previous) || previous != clickable;
             LastClickable[window.Handle] = clickable;
 
-            window.BackColor = Color.Lime;
-            window.TransparencyKey = Color.Lime;
+            // Native host uses lime as its colour key; WebView2 itself stays
+            // transparent so the host key can remove only the empty regions.
+            if (window.BackColor != Color.Lime)
+                window.BackColor = Color.Lime;
+            if (window.TransparencyKey != Color.Lime)
+                window.TransparencyKey = Color.Lime;
 
             try
             {
                 var view = GetWebView(window);
-                if (view != null)
-                    view.DefaultBackgroundColor = clickable ? Color.Transparent : Color.Lime;
+                if (view != null && view.DefaultBackgroundColor != Color.Transparent)
+                    view.DefaultBackgroundColor = Color.Transparent;
             }
             catch (Exception ex)
             {
@@ -135,21 +138,14 @@ namespace WebOverlay
             }
 
             int exStyle = GetWindowLong(window.Handle, GWL_EXSTYLE);
-            int desiredStyle;
+            int desiredStyle = exStyle | WS_EX_LAYERED;
 
+            // The layered style is part of transparency and MUST NOT be removed
+            // when the overlay becomes clickable. Only WS_EX_TRANSPARENT changes.
             if (clickable)
-            {
-                // Clickable overlays must not be kept as WS_EX_LAYERED by this
-                // helper. The previous implementation re-added WS_EX_LAYERED
-                // every 250 ms, immediately undoing ToggleClickable and leaving
-                // the lime host background visible.
-                desiredStyle = exStyle & ~(WS_EX_TRANSPARENT | WS_EX_LAYERED);
-            }
+                desiredStyle &= ~WS_EX_TRANSPARENT;
             else
-            {
-                // Click-through overlays need the native layered colour-key path.
-                desiredStyle = exStyle | WS_EX_TRANSPARENT | WS_EX_LAYERED;
-            }
+                desiredStyle |= WS_EX_TRANSPARENT;
 
             if (desiredStyle != exStyle)
             {
@@ -158,18 +154,20 @@ namespace WebOverlay
                     SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
             }
 
-            if (!clickable)
-            {
-                SetLayeredWindowAttributes(
-                    window.Handle,
-                    ColorTranslator.ToWin32(Color.Lime),
-                    255,
-                    LWA_COLORKEY);
-            }
+            // Re-apply the colour key in both states so a clickability toggle
+            // can never leave the lime host background visible.
+            SetLayeredWindowAttributes(
+                window.Handle,
+                ColorTranslator.ToWin32(Color.Lime),
+                255,
+                LWA_COLORKEY);
+
+            if (window.Enabled != clickable)
+                window.Enabled = clickable;
 
             if (changed)
             {
-                Program.Log($"OverlayTransparencyFix: {window.Url} clickable={clickable} style={(clickable ? \"normal\" : \"layered-colorkey\")}");
+                Program.Log($"OverlayTransparencyFix: {window.Url} clickable={clickable} style=layered-colorkey, clickThrough={!clickable}");
             }
 
             window.Invalidate();
