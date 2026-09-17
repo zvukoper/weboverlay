@@ -1,4 +1,4 @@
-#nullable disable
+﻿#nullable disable
 
 using System;
 using System.Collections.Generic;
@@ -810,6 +810,7 @@ namespace WebOverlay
         private void InitializeForm()
         {
             FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
             TopMost = true;
             BackColor = Color.Lime;
             TransparencyKey = Color.Lime;
