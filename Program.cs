@@ -283,6 +283,19 @@ namespace WebOverlay
             ActiveWindow?.ToggleContentVisibility();
         }
 
+        public static bool CloseWindowByUrl(string targetUrl)
+        {
+            if (string.IsNullOrWhiteSpace(targetUrl))
+                return false;
+
+            var window = _windows.FirstOrDefault(w => string.Equals(w.Url, targetUrl, StringComparison.OrdinalIgnoreCase));
+            if (window == null || window.IsDisposed)
+                return false;
+
+            window.Close();
+            return true;
+        }
+
         public static void ToggleClickableActive()
         {
             ActiveWindow?.ToggleClickable();
@@ -327,12 +340,19 @@ namespace WebOverlay
 
                 string url = null;
                 bool append = false;
+                bool close = false;
                 for (int i = 0; i < args.Length; i++)
                 {
                     string arg = args[i];
                     if (arg.Equals("-append", StringComparison.OrdinalIgnoreCase) || arg.Equals("append", StringComparison.OrdinalIgnoreCase))
                     {
                         append = true;
+                        if (i + 1 < args.Length)
+                            url = args[++i];
+                    }
+                    else if (arg.Equals("close", StringComparison.OrdinalIgnoreCase) || arg.Equals("-close", StringComparison.OrdinalIgnoreCase))
+                    {
+                        close = true;
                         if (i + 1 < args.Length)
                             url = args[++i];
                     }
@@ -345,13 +365,12 @@ namespace WebOverlay
                 if (!createdNew)
                 {
                     if (!string.IsNullOrEmpty(url))
-                    {
-                        // Starting WebOverlay for another URL must never replace an existing HUD window.
-                        // The named-pipe command is append-only even when the caller omitted -append.
-                        SendCommandToExistingInstance("append|" + url);
-                    }
+                        SendCommandToExistingInstance((close ? "close|" : "append|") + url);
                     return;
                 }
+
+                if (close)
+                    return;
 
                 _appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay");
                 _localesDir = Path.Combine(_appDataDir, "locales");
@@ -478,21 +497,29 @@ namespace WebOverlay
                         if (parts.Length != 2 || _firstWindow == null || _firstWindow.IsDisposed)
                             continue;
 
+                        string command = parts[0];
                         string pipeUrl = parts[1];
                         _firstWindow.Invoke(new Action(() =>
                         {
                             try
                             {
-                                // All external launches create independent overlay windows.
-                                // An incoming URL must never replace/navigate an existing HUD.
-                                WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
-                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
+                                if (command == "append")
+                                {
+                                    WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
+                                    Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
+                                }
+                                else if (command == "close")
+                                {
+                                    bool closed = WindowManager.CloseWindowByUrl(pipeUrl);
+                                    Log($"Pipe close url={pipeUrl} closed={closed}");
+                                }
                             }
                             catch (Exception ex)
                             {
                                 Log($"Ошибка команды pipe: {ex.Message}");
                             }
                         }));
+
                     }
                     catch (Exception ex)
                     {
@@ -724,7 +751,7 @@ namespace WebOverlay
             configDir = Path.Combine(appDataDir, "config");
             Directory.CreateDirectory(configDir);
 
-            _clickable = config.Clickable;
+            _clickable = IsSpecialClickThroughUrl(url) ? false : config.Clickable;
 
             InitializeForm();
             InitializeWebView();
@@ -758,6 +785,16 @@ namespace WebOverlay
                 FlushDeferredStateSave();
             };
             _manipulationTimer.Start();
+        }
+
+        private static bool IsSpecialClickThroughUrl(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            return value.Contains("web_quests.html", StringComparison.OrdinalIgnoreCase) ||
+                   value.Contains("web_notifications.html", StringComparison.OrdinalIgnoreCase) ||
+                   value.Contains("web_ar_hud.html", StringComparison.OrdinalIgnoreCase);
         }
 
         private void Log(string msg)
@@ -824,13 +861,27 @@ namespace WebOverlay
                 {
                     try
                     {
-                        if (e.TryGetWebMessageAsString() == "toggle")
+                        string message = e.TryGetWebMessageAsString();
+                        if (message == "toggle")
+                        {
                             WindowManager.ToggleLockMode();
+                            return;
+                        }
+                        if (!string.IsNullOrWhiteSpace(message) && message.StartsWith("{"))
+                        {
+                            var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(message);
+                            if (payload != null && payload.TryGetValue("command", out var command) &&
+                                string.Equals(command.GetString(), "set_clickable", StringComparison.OrdinalIgnoreCase) &&
+                                payload.TryGetValue("value", out var value))
+                            {
+                                SetNativeClickability(value.GetBoolean());
+                            }
+                        }
                     }
                     catch { }
                 };
 
-                webView.CoreWebView2.Navigate(url);
+                webView.CoreWebView2.Navigate(url);                webView.CoreWebView2.Navigate(url);
             }
             catch (Exception ex)
             {
@@ -967,6 +1018,17 @@ namespace WebOverlay
         {
             Enabled = true;
             SetClickThrough(!_clickable);
+        }
+
+        public void SetNativeClickability(bool clickable)
+        {
+            if (url != null && url.Contains("web_quests.html", StringComparison.OrdinalIgnoreCase))
+                _clickable = clickable;
+            else
+                _clickable = false;
+
+            SetClickThrough(!_clickable);
+            UpdateManipulationInfo();
         }
 
         private void SetClickThrough(bool enable)
@@ -1127,44 +1189,12 @@ namespace WebOverlay
             return Path.Combine(configDir, safe + ".txt");
         }
 
-        private string GetLegacyMonitorStateFilePath()
-        {
-            string safe = GetSafeFilePart(url ?? "WebOverlay");
-            try
-            {
-                Screen current = Screen.FromHandle(Handle);
-                string monitorKey = GetMonitorKey(current);
-                string preferred = Path.Combine(configDir, safe + "__monitor_" + monitorKey + ".txt");
-                if (File.Exists(preferred))
-                    return preferred;
-            }
-            catch { }
-
-            try
-            {
-                return Directory.GetFiles(configDir, safe + "__monitor_*.txt")
-                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-                    .FirstOrDefault();
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
         private static string GetSafeFilePart(string value)
         {
             string safe = string.Join("_", value.Split(Path.GetInvalidFileNameChars()));
             if (safe.Length > 180)
                 safe = safe[..180];
             return safe;
-        }
-
-        private static string GetMonitorKey(Screen monitor)
-        {
-            string name = monitor?.DeviceName ?? "PRIMARY";
-            var chars = name.Where(char.IsLetterOrDigit).ToArray();
-            return chars.Length == 0 ? "PRIMARY" : new string(chars);
         }
 
         private void LoadState()
@@ -1174,17 +1204,8 @@ namespace WebOverlay
             {
                 if (!TryLoadStateFile(GetStateFilePath()))
                 {
-                    string legacy = GetLegacyMonitorStateFilePath();
-                    if (!string.IsNullOrEmpty(legacy) && TryLoadStateFile(legacy))
-                    {
-                        SaveState();
-                        Log($"LoadState: migrated legacy monitor state {legacy} -> {GetStateFilePath()}");
-                    }
-                    else
-                    {
-                        ApplyDefaultState();
-                        SaveState();
-                    }
+                    ApplyDefaultState();
+                    SaveState();
                 }
             }
             finally
@@ -1229,24 +1250,21 @@ namespace WebOverlay
         {
             _zoomFactor = 1.0;
 
-            var screen = Screen.PrimaryScreen;
+            var screen = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
             if (screen == null)
             {
                 Size = new Size(800, 600);
                 Location = new Point(100, 100);
-                Log($"ApplyDefaultState: no primary screen, fallback 800x600 at 100,100 for {url}");
                 return;
             }
 
-            var area = screen.WorkingArea;
+            var area = screen.Bounds;
             string normalizedUrl = (url ?? string.Empty).ToLowerInvariant();
 
-            if (normalizedUrl.Contains("help.html"))
+            if (normalizedUrl.Contains("web_ar_hud.html") || normalizedUrl.Contains("web_quests.html") || normalizedUrl.Contains("web_notifications.html"))
             {
-                Size = new Size(800, 1000);
-                int x = Math.Min(area.Right - Width, area.Left + 560);
-                int y = area.Top + 15;
-                Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
+                Size = new Size(area.Width, area.Height);
+                Location = new Point(area.Left, area.Top);
             }
             else if (normalizedUrl.Contains("web_pda_map.html"))
             {
@@ -1261,10 +1279,8 @@ namespace WebOverlay
                 int height = Math.Max(100, (int)Math.Round(area.Height * 0.32));
                 width = Math.Min(width, area.Width);
                 height = Math.Min(height, area.Height);
-                int x = area.Left + (area.Width - width) / 2;
-                int y = area.Bottom - height;
                 Size = new Size(width, height);
-                Location = new Point(x, y);
+                Location = new Point(area.Left + (area.Width - width) / 2, area.Bottom - height);
             }
             else if (normalizedUrl.Contains("web_pause_logo.html"))
             {
@@ -1282,6 +1298,13 @@ namespace WebOverlay
                 Size = new Size(width, height);
                 Location = new Point(area.Right - width, area.Top);
             }
+            else if (normalizedUrl.Contains("help.html"))
+            {
+                Size = new Size(800, 1000);
+                int x = Math.Min(area.Right - Width, area.Left + 560);
+                int y = area.Top + 15;
+                Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
+            }
             else
             {
                 Size = new Size(800, 600);
@@ -1292,8 +1315,6 @@ namespace WebOverlay
 
             if (webView != null)
                 webView.ZoomFactor = _zoomFactor;
-
-            Log($"ApplyDefaultState: url={url}, location={Location.X},{Location.Y}, size={Width}x{Height}");
         }
 
         private void SaveState()
@@ -1506,3 +1527,4 @@ namespace WebOverlay
         }
     }
 }
+
