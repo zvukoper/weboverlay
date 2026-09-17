@@ -27,7 +27,6 @@ public static class HelpPage
         string zOut = config.ZoomOut;
         string hide = config.ToggleHide;
         string clickable = config.ToggleClickable;
-        string monitor = config.MoveMonitor;
         string wDec = config.ResizeWidthDecrease;
         string wInc = config.ResizeWidthIncrease;
         string hDec = config.ResizeHeightDecrease;
@@ -79,7 +78,6 @@ kbd {{ background:#222; padding:2px 8px; border-radius:4px; border:1px solid #66
 <li><kbd>{zOut}</kbd> — {Localization.Get("ZoomOutDesc")}</li>
 <li><kbd>{hide}</kbd> — {Localization.Get("ToggleHideDesc")}</li>
 <li><kbd>{clickable}</kbd> — {Localization.Get("ToggleClickableDesc")}</li>
-<li><kbd>{monitor}</kbd> — {Localization.Get("MoveMonitorDesc", "move active window to next monitor")}</li>
 <li><kbd>{wDec}</kbd> — {Localization.Get("ResizeWidthDecreaseDesc")}</li>
 <li><kbd>{wInc}</kbd> — {Localization.Get("ResizeWidthIncreaseDesc")}</li>
 <li><kbd>{hDec}</kbd> — {Localization.Get("ResizeHeightDecreaseDesc")}</li>
