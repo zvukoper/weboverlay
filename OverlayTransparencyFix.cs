@@ -1,18 +1,20 @@
 using System;
 using System.Drawing;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using Microsoft.Web.WebView2.WinForms;
 
 namespace WebOverlay
 {
     /// <summary>
-    /// Keeps the transparent overlay windows using the Win32 colour-key path.
-    /// WebOverlay uses a lime background as the transparency key. When a window
-    /// is switched to WS_EX_LAYERED for click-through handling, the WinForms
-    /// TransparencyKey alone is not sufficient; the native layered-window
-    /// colour key must be applied explicitly as well.
+    /// Keeps WebView2 overlay pages on the same colour-key transparency path.
+    /// The host window, WebView2 default background and transparent HTML areas
+    /// all use Color.Lime; the host then removes that exact colour with
+    /// LWA_COLORKEY. This prevents WebView2 from exposing the lime host colour
+    /// through transparent HTML content.
     /// </summary>
     internal static class OverlayTransparencyFix
     {
@@ -22,6 +24,9 @@ namespace WebOverlay
         private const int SWP_NOMOVE = 0x0002;
         private const int SWP_NOSIZE = 0x0001;
         private const int SWP_FRAMECHANGED = 0x0020;
+
+        private static readonly FieldInfo? WebViewField =
+            typeof(OverlayForm).GetField("webView", BindingFlags.Instance | BindingFlags.NonPublic);
 
         private static Timer? _timer;
 
@@ -82,8 +87,19 @@ namespace WebOverlay
 
         private static void Apply(OverlayForm window)
         {
+            // The same key colour must be used by the native host and WebView2.
             window.BackColor = Color.Lime;
             window.TransparencyKey = Color.Lime;
+
+            try
+            {
+                if (WebViewField?.GetValue(window) is WebView2 view)
+                    view.DefaultBackgroundColor = Color.Lime;
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"OverlayTransparencyFix WebView2 background error: {ex.Message}");
+            }
 
             int exStyle = GetWindowLong(window.Handle, GWL_EXSTYLE);
             if ((exStyle & WS_EX_LAYERED) == 0)
@@ -95,8 +111,7 @@ namespace WebOverlay
                 Program.Log($"OverlayTransparencyFix: enabled layered transparency for {window.Url}");
             }
 
-            // Explicitly tell the layered window that Color.Lime is the
-            // transparent key. Alpha remains fully opaque for non-key pixels.
+            // Explicit Win32 colour key. All non-key pixels remain fully opaque.
             SetLayeredWindowAttributes(
                 window.Handle,
                 ColorTranslator.ToWin32(Color.Lime),
