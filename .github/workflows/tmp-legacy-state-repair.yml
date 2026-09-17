@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
 
+# Trigger this workflow only after the workflow file itself has landed in main.
 jobs:
   repair:
     if: ${{ !contains(github.event.head_commit.message, 'AUTO-FIX LEGACY OVERLAY STATE') && !contains(github.event.head_commit.message, 'Remove temporary legacy overlay state workflow') }}
