@@ -161,12 +161,8 @@ namespace WebOverlay
 
             form.Show();
 
-            if (_windows.Count > 1)
-            {
-                var first = _windows[0];
-                form.Location = new Point(first.Location.X + 30 * (_windows.Count - 1), first.Location.Y + 30 * (_windows.Count - 1));
-            }
-
+            // Do not offset additional windows. Each URL owns an independent
+            // state file, and a fresh URL must appear at its own defined default.
             Program.Log($"WindowManager: создано окно {url}, active={setActive}, всего окон {_windows.Count}");
             form.UpdateManipulationInfo();
             return form;
@@ -1406,29 +1402,77 @@ namespace WebOverlay
         private void ApplyDefaultState(Screen monitor)
         {
             _zoomFactor = 1.0;
-            Size = new Size(800, 600);
 
             var screen = monitor ?? Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
             if (screen == null)
             {
+                Size = new Size(800, 600);
                 Location = new Point(100, 100);
+                Log($"ApplyDefaultState: no screen, fallback 800x600 at 100,100 for {url}");
                 return;
             }
 
             var area = screen.WorkingArea;
-            int x = area.Left + Math.Max(0, (area.Width - Width) / 2);
-            int y = area.Top + Math.Max(0, (area.Height - Height) / 2);
+            string normalizedUrl = (url ?? string.Empty).ToLowerInvariant();
 
-            if (url.Contains("help.html", StringComparison.OrdinalIgnoreCase))
+            // Help page keeps its existing dedicated layout.
+            if (normalizedUrl.Contains("help.html"))
             {
-                x = Math.Min(area.Right - Width, area.Left + 560);
-                y = area.Top + 15;
                 Size = new Size(800, 1000);
+                int x = Math.Min(area.Right - Width, area.Left + 560);
+                int y = area.Top + 15;
+                Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
+            }
+            // PDA / minimap: square, bottom-left, 30% of working-area height.
+            else if (normalizedUrl.Contains("web_pda_map.html"))
+            {
+                int side = Math.Max(100, (int)Math.Round(area.Height * 0.30));
+                side = Math.Min(side, Math.Min(area.Width, area.Height));
+                Size = new Size(side, side);
+                Location = new Point(area.Left, area.Bottom - side);
+            }
+            // Hybrid UI: 42% of screen width, 32% of screen height, bottom-centre.
+            else if (normalizedUrl.Contains("web_ui_hybrid.html"))
+            {
+                int width = Math.Max(100, (int)Math.Round(area.Width * 0.42));
+                int height = Math.Max(100, (int)Math.Round(area.Height * 0.32));
+                width = Math.Min(width, area.Width);
+                height = Math.Min(height, area.Height);
+                int x = area.Left + (area.Width - width) / 2;
+                int y = area.Bottom - height;
+                Size = new Size(width, height);
+                Location = new Point(x, y);
+            }
+            // Pause mini-logo: square, top-right, 18% of working-area height.
+            else if (normalizedUrl.Contains("web_pause_logo.html"))
+            {
+                int side = Math.Max(100, (int)Math.Round(area.Height * 0.18));
+                side = Math.Min(side, Math.Min(area.Width, area.Height));
+                Size = new Size(side, side);
+                Location = new Point(area.Right - side, area.Top);
+            }
+            // Heights/debug view retains the documented top-right layout.
+            else if (normalizedUrl.Contains("web_heights.html"))
+            {
+                int width = Math.Max(100, (int)Math.Round(area.Width * 0.34));
+                int height = Math.Max(100, (int)Math.Round(area.Height * 0.30));
+                width = Math.Min(width, area.Width);
+                height = Math.Min(height, area.Height);
+                Size = new Size(width, height);
+                Location = new Point(area.Right - width, area.Top);
+            }
+            else
+            {
+                Size = new Size(800, 600);
+                int x = area.Left + Math.Max(0, (area.Width - Width) / 2);
+                int y = area.Top + Math.Max(0, (area.Height - Height) / 2);
+                Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
             }
 
-            Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
             if (webView != null)
                 webView.ZoomFactor = _zoomFactor;
+
+            Log($"ApplyDefaultState: url={url}, monitor={screen.DeviceName}, location={Location.X},{Location.Y}, size={Width}x{Height}");
         }
 
         private void SaveStateForMonitor(Screen monitor)
