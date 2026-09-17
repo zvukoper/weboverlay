@@ -19,15 +19,13 @@ $text = Get-Content -Raw -Encoding UTF8 $path
 # --- command-line parsing and single-instance routing ----------------------
 $parseStart = $text.IndexOf('                string url = null;', [StringComparison]::Ordinal)
 if ($parseStart -lt 0) { throw 'Main argument parser start not found' }
-$appendEnd = $text.IndexOf('                    else if (!arg.StartsWith("-"))', $parseStart, [StringComparison]::Ordinal)
-if ($appendEnd -lt 0) { throw 'Main argument parser marker not found' }
-$appendMarkerEnd = $appendEnd
-$parsePrefix = $text.Substring(0, $appendMarkerEnd)
-if ($parsePrefix.IndexOf('bool close = false;', [StringComparison]::Ordinal) -lt 0)
-{
-    $text = $text.Insert($appendMarkerEnd, '                bool close = false;' + [Environment]::NewLine)
+$closeMarker = '                    else if (!arg.StartsWith("-"))'
+$closeInsertAt = $text.IndexOf($closeMarker, $parseStart, [StringComparison]::Ordinal)
+if ($closeInsertAt -lt 0) { throw 'Main argument parser marker not found' }
+if ($text.IndexOf('                bool close = false;', $parseStart, [StringComparison]::Ordinal) -lt 0) {
+    $text = $text.Insert($closeInsertAt, '                bool close = false;' + [Environment]::NewLine)
 }
-$text = Replace-Exact $text '                    else if (!arg.StartsWith("-"))' '                    else if (arg.Equals("close", StringComparison.OrdinalIgnoreCase) || arg.Equals("-close", StringComparison.OrdinalIgnoreCase))
+$text = Replace-Exact $text $closeMarker '                    else if (arg.Equals("close", StringComparison.OrdinalIgnoreCase) || arg.Equals("-close", StringComparison.OrdinalIgnoreCase))
                     {
                         close = true;
                         if (i + 1 < args.Length)
@@ -66,7 +64,20 @@ $closeMethod = @'
 '@
 $text = Replace-Exact $text '        public static void ToggleClickableActive()' ($closeMethod + '        public static void ToggleClickableActive()') 'CloseWindowByUrl'
 
+# --- pipe handler -----------------------------------------------------------
+$pipeStart = $text.IndexOf("                        string[] parts = line.Split('|');", [StringComparison]::Ordinal)
+if ($pipeStart -lt 0) { throw 'Pipe parts line not found' }
+$pipeInvoke = $text.IndexOf('                        _firstWindow.Invoke(new Action(() =>', $pipeStart, [StringComparison]::Ordinal)
+$pipeEnd = $text.IndexOf('                        }));', $pipeInvoke, [StringComparison]::Ordinal)
+if ($pipeInvoke -lt 0 -or $pipeEnd -lt 0) { throw 'Pipe invoke markers not found' }
+$pipeEnd += '                        }));'.Length
+$pipePrefix = $text.Substring(0, $pipeStart)
+$pipeSuffix = $text.Substring($pipeEnd)
 $pipeReplacement = @'
+                        string[] parts = line.Split('|');
+                        if (parts.Length != 2 || _firstWindow == null || _firstWindow.IsDisposed)
+                            continue;
+
                         string command = parts[0];
                         string pipeUrl = parts[1];
                         _firstWindow.Invoke(new Action(() =>
@@ -90,21 +101,7 @@ $pipeReplacement = @'
                             }
                         }));
 '@
-$text = Replace-Between $text '                        string[] parts = line.Split('|');' '                    }' @'
-                        string[] parts = line.Split('|');
-                        if (parts.Length != 2 || _firstWindow == null || _firstWindow.IsDisposed)
-                            continue;
-
-'@ 'noop'
-# Restore the actual block from the exact current pipe method using its unique starting marker.
-$pipeStart = $text.IndexOf('                        string[] parts = line.Split('|');', [StringComparison]::Ordinal)
-$pipeInvoke = $text.IndexOf('                        _firstWindow.Invoke(new Action(() =>', $pipeStart, [StringComparison]::Ordinal)
-$pipeEnd = $text.IndexOf('                        }));', $pipeInvoke, [StringComparison]::Ordinal)
-if ($pipeStart -lt 0 -or $pipeInvoke -lt 0 -or $pipeEnd -lt 0) { throw 'Pipe handler markers not found' }
-$pipeEnd = $pipeEnd + '                        }));'.Length
-$prefix = $text.Substring(0, $pipeStart)
-$suffix = $text.Substring($pipeEnd)
-$text = $prefix + $pipeReplacement + $suffix
+$text = $pipePrefix + $pipeReplacement + $pipeSuffix
 
 # --- fullscreen special windows are click-through by default ----------------
 $text = Replace-Exact $text '            _clickable = config.Clickable;' '            _clickable = IsSpecialClickThroughUrl(url) ? false : config.Clickable;' 'special click-through initialization'
@@ -130,6 +127,7 @@ $text = Replace-Exact $text '            url = newUrl;
             Text = GetContentName();
             LoadState();' 'navigate title'
 
+# Web messages from quest overlay toggle native clickability while paused.
 $webMessageStart = '                webView.CoreWebView2.WebMessageReceived += (s, e) =>'
 $webMessageEnd = '                webView.CoreWebView2.Navigate(url);'
 $webMessage = @'
@@ -143,7 +141,6 @@ $webMessage = @'
                             WindowManager.ToggleLockMode();
                             return;
                         }
-
                         if (!string.IsNullOrWhiteSpace(message) && message.StartsWith("{"))
                         {
                             var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(message);
@@ -181,6 +178,9 @@ if ($text.Contains('        private string GetLegacyMonitorStateFilePath()', [St
 if ($text.Contains('        private static string GetMonitorKey(Screen monitor)', [StringComparison]::Ordinal)) {
     $text = Replace-Between $text '        private static string GetMonitorKey(Screen monitor)' '        private void LoadState()' '        private void LoadState()' 'remove monitor key'
 }
+if ($text.Contains('        private static Screen GetDefaultEts2Screen()', [StringComparison]::Ordinal)) {
+    $text = Replace-Between $text '        private static Screen GetDefaultEts2Screen()' '        private void LoadState()' '        private void LoadState()' 'remove unused game-screen helper'
+}
 
 $singleLoad = @'
         private void LoadState()
@@ -202,7 +202,7 @@ $singleLoad = @'
         }
 
 '@
-$text = Replace-Between $text '        private void LoadState()' '        private bool TryLoadStateFile' $singleLoad 'single state load'
+$text = Replace-Between $text '        private void LoadState()' '        private bool TryLoadStateFile' $singleLoad 'single URL state loading'
 
 $singleDefaults = @'
         private void ApplyDefaultState()
