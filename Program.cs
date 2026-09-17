@@ -15,7 +15,6 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace WebOverlay
 {
-    // CI trigger check: no runtime behavior change.
     public class AppConfig
     {
         public string Language { get; set; } = "en";
@@ -29,7 +28,6 @@ namespace WebOverlay
         public string ZoomOut { get; set; } = "Ctrl+Shift+Alt+OemMinus";
         public string ToggleHide { get; set; } = "Ctrl+Shift+Alt+P";
         public string ToggleClickable { get; set; } = "Ctrl+Shift+Alt+U";
-        public string MoveMonitor { get; set; } = "Ctrl+Shift+Alt+Oem5";
         public string ResizeWidthDecrease { get; set; } = "Ctrl+Shift+Alt+OemOpenBrackets";
         public string ResizeWidthIncrease { get; set; } = "Ctrl+Shift+Alt+OemCloseBrackets";
         public string ResizeHeightDecrease { get; set; } = "Ctrl+Shift+Alt+OemSemicolon";
@@ -161,8 +159,6 @@ namespace WebOverlay
 
             form.Show();
 
-            // Do not offset additional windows. Each URL owns an independent
-            // state file, and a fresh URL must appear at its own defined default.
             Program.Log($"WindowManager: создано окно {url}, active={setActive}, всего окон {_windows.Count}");
             form.UpdateManipulationInfo();
             return form;
@@ -291,11 +287,6 @@ namespace WebOverlay
         {
             ActiveWindow?.ToggleClickable();
         }
-
-        public static void MoveActiveToNextMonitor()
-        {
-            ActiveWindow?.MoveToNextMonitor();
-        }
     }
 
     internal static class Program
@@ -312,34 +303,6 @@ namespace WebOverlay
         internal const int MOD_ALT = 0x0001;
         internal const int MOD_CONTROL = 0x0002;
         internal const int MOD_SHIFT = 0x0004;
-
-        private const int HWND_TOPMOST = -1;
-        private const int SWP_NOMOVE = 0x0002;
-        private const int SWP_NOSIZE = 0x0001;
-        private const int SWP_SHOWWINDOW = 0x0040;
-        private const int SW_SHOW = 5;
-
-        private const int HOTKEY_TOGGLE_LOCK = 1;
-        private const int HOTKEY_TOGGLE_HIDE = 2;
-        private const int HOTKEY_PGUP = 3;
-        private const int HOTKEY_PGDN = 4;
-        private const int HOTKEY_TOGGLE_CLICKABLE = 5;
-        private const int WM_HOTKEY = 0x0312;
-
-        [DllImport("user32.dll")]
-        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, int uFlags);
-        [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-        [DllImport("user32.dll")]
-        private static extern bool BringWindowToTop(IntPtr hWnd);
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-        [DllImport("user32.dll")]
-        private static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
-        [DllImport("user32.dll")]
-        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
-        [DllImport("user32.dll")]
-        private static extern short GetAsyncKeyState(int vKey);
 
         [STAThread]
         private static void Main(string[] args)
@@ -383,7 +346,9 @@ namespace WebOverlay
                 {
                     if (!string.IsNullOrEmpty(url))
                     {
-                        SendCommandToExistingInstance((append ? "append" : "replace") + "|" + url);
+                        // Starting WebOverlay for another URL must never replace an existing HUD window.
+                        // The named-pipe command is append-only even when the caller omitted -append.
+                        SendCommandToExistingInstance("append|" + url);
                     }
                     return;
                 }
@@ -437,6 +402,18 @@ namespace WebOverlay
                 try { _mutex?.Dispose(); } catch { }
             }
         }
+
+        private const int HOTKEY_TOGGLE_LOCK = 1;
+        private const int HOTKEY_TOGGLE_HIDE = 2;
+        private const int HOTKEY_PGUP = 3;
+        private const int HOTKEY_PGDN = 4;
+        private const int HOTKEY_TOGGLE_CLICKABLE = 5;
+        private const int WM_HOTKEY = 0x0312;
+
+        [DllImport("user32.dll")]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
+        [DllImport("user32.dll")]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
         private static bool RegisterConfiguredHotKey(IntPtr handle, int id, string binding)
         {
@@ -501,24 +478,15 @@ namespace WebOverlay
                         if (parts.Length != 2 || _firstWindow == null || _firstWindow.IsDisposed)
                             continue;
 
-                        string command = parts[0];
                         string pipeUrl = parts[1];
                         _firstWindow.Invoke(new Action(() =>
                         {
                             try
                             {
-                                if (command == "append")
-                                {
-                                    WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
-                                }
-                                else if (command == "replace")
-                                {
-                                    var active = WindowManager.ActiveWindow;
-                                    if (active != null)
-                                        active.NavigateToUrl(pipeUrl);
-                                    else
-                                        WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, true);
-                                }
+                                // All external launches create independent overlay windows.
+                                // An incoming URL must never replace/navigate an existing HUD.
+                                WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
+                                Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
                             }
                             catch (Exception ex)
                             {
@@ -718,8 +686,6 @@ namespace WebOverlay
         private readonly System.Windows.Forms.Timer _manipulationTimer;
         private bool _stateDirty;
         private DateTime _lastDeferredSaveUtc = DateTime.MinValue;
-        private bool _monitorHotkeyArmed;
-        private Keys _monitorHotkeyKey = Keys.None;
         private bool _stateApplying;
 
         public bool IsLocked => _isLocked;
@@ -784,7 +750,6 @@ namespace WebOverlay
                     _stateDirty = true;
                 UpdateManipulationInfo();
             };
-            KeyUp += OnKeyUp;
 
             _manipulationTimer = new System.Windows.Forms.Timer { Interval = 15 };
             _manipulationTimer.Tick += (_, _) =>
@@ -829,7 +794,6 @@ namespace WebOverlay
 
             Controls.Add(webView);
             webView.KeyDown += (s, e) => OnKeyDown(s, e);
-            webView.KeyUp += (s, e) => OnKeyUp(s, e);
             webView.PreviewKeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Escape || e.Control || e.Shift || e.Alt)
@@ -878,8 +842,8 @@ namespace WebOverlay
 
         public void NavigateToUrl(string newUrl)
         {
-            SaveState();
             url = newUrl;
+            LoadState();
             if (webView?.CoreWebView2 != null)
                 webView.CoreWebView2.Navigate(newUrl);
             UpdateManipulationInfo();
@@ -1021,62 +985,13 @@ namespace WebOverlay
             Log($"SetClickThrough: {enable}");
         }
 
-        public void MoveToNextMonitor()
-        {
-            var screens = Screen.AllScreens
-                .OrderBy(s => s.Bounds.Left)
-                .ThenBy(s => s.Bounds.Top)
-                .ThenBy(s => s.DeviceName, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-
-            if (screens.Length <= 1)
-                return;
-
-            Screen current = Screen.FromHandle(Handle);
-            int currentIndex = Array.FindIndex(screens, s =>
-                string.Equals(s.DeviceName, current.DeviceName, StringComparison.OrdinalIgnoreCase));
-            if (currentIndex < 0)
-                currentIndex = 0;
-
-            Screen target = screens[(currentIndex + 1) % screens.Length];
-
-            // Every monitor owns its own position/size/zoom state.
-            SaveStateForMonitor(current);
-
-            _stateApplying = true;
-            try
-            {
-                if (!LoadStateForMonitor(target, allowLegacy: false))
-                {
-                    ApplyDefaultState(target);
-                    SaveStateForMonitor(target);
-                }
-            }
-            finally
-            {
-                _stateApplying = false;
-                _stateDirty = false;
-            }
-
-            UpdateManipulationInfo();
-            Log($"MoveToNextMonitor: {current.DeviceName} -> {target.DeviceName}, location={Location.X},{Location.Y}");
-        }
-
         public void UpdateManipulationInfo()
         {
             if (!_manipulationMode || _infoForm == null || _infoForm.IsDisposed)
                 return;
 
-            Screen screen;
-            try { screen = Screen.FromHandle(Handle); }
-            catch { screen = Screen.PrimaryScreen; }
-
-            int monitorIndex = Array.FindIndex(Screen.AllScreens, s => s.DeviceName == screen.DeviceName) + 1;
-            if (monitorIndex <= 0)
-                monitorIndex = 1;
-
             string title = GetContentName();
-            string text = $"{title} | {Width}x{Height} | zoom {_zoomFactor * 100:0}% | X:{Left} Y:{Top} | bounds {Left},{Top}-{Right},{Bottom} | monitor {monitorIndex}/{Screen.AllScreens.Length} | click {( _clickable ? "ON" : "OFF" )}";
+            string text = $"{title} | {Width}x{Height} | zoom {_zoomFactor * 100:0}% | X:{Left} Y:{Top} | bounds {Left},{Top}-{Right},{Bottom} | click {( _clickable ? "ON" : "OFF" )}";
             _infoForm.UpdateFor(this, text);
         }
 
@@ -1111,11 +1026,6 @@ namespace WebOverlay
             if (WindowManager.ActiveWindow != this || WindowManager.IsLockMode || _isLocked)
                 return;
 
-            // Monitor hotkey: arm on press, execute once on release.
-            if (TryArmMonitorHotkey(e))
-                return;
-
-            // Movement is continuous and driven by _manipulationTimer.
             if (MatchesMovementBinding(_config.MoveLeft, e) ||
                 MatchesMovementBinding(_config.MoveRight, e) ||
                 MatchesMovementBinding(_config.MoveUp, e) ||
@@ -1133,66 +1043,6 @@ namespace WebOverlay
             if (CheckBinding(_config.ResizeWidthIncrease, e, () => { Size = new Size(Width + _config.ResizeStep, Height); SaveState(); })) return;
             if (CheckBinding(_config.ResizeHeightDecrease, e, () => { Size = new Size(Width, Math.Max(100, Height - _config.ResizeStep)); SaveState(); })) return;
             if (CheckBinding(_config.ResizeHeightIncrease, e, () => { Size = new Size(Width, Height + _config.ResizeStep); SaveState(); })) return;
-        }
-
-        private void OnKeyUp(object sender, KeyEventArgs e)
-        {
-            if (!_monitorHotkeyArmed)
-                return;
-
-            if (e.KeyCode == _monitorHotkeyKey)
-            {
-                KeyBinding kb;
-                try { kb = KeyBinding.Parse(_config.MoveMonitor); }
-                catch { kb = new KeyBinding(Keys.None); }
-
-                bool modifiersStillDown =
-                    (!kb.Ctrl || IsKeyDown(VK_CONTROL)) &&
-                    (!kb.Shift || IsKeyDown(VK_SHIFT)) &&
-                    (!kb.Alt || IsKeyDown(VK_MENU));
-
-                bool shouldMove = modifiersStillDown &&
-                    WindowManager.ActiveWindow == this &&
-                    !WindowManager.IsLockMode &&
-                    !_isLocked;
-
-                _monitorHotkeyArmed = false;
-                _monitorHotkeyKey = Keys.None;
-
-                if (shouldMove)
-                    MoveToNextMonitor();
-
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-            }
-            else if (e.KeyCode == Keys.Control || e.KeyCode == Keys.Shift || e.KeyCode == Keys.Menu)
-            {
-                if (!IsKeyDown((int)e.KeyCode))
-                {
-                    _monitorHotkeyArmed = false;
-                    _monitorHotkeyKey = Keys.None;
-                }
-            }
-        }
-
-        private bool TryArmMonitorHotkey(KeyEventArgs e)
-        {
-            try
-            {
-                var kb = KeyBinding.Parse(_config.MoveMonitor);
-                if (kb.Key == Keys.None || !kb.Matches(e.KeyData))
-                    return false;
-
-                _monitorHotkeyArmed = true;
-                _monitorHotkeyKey = kb.Key;
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         private static bool MatchesMovementBinding(string binding, KeyEventArgs e)
@@ -1273,20 +1123,33 @@ namespace WebOverlay
 
         private string GetStateFilePath()
         {
-            return GetStateFilePath(Screen.FromHandle(Handle));
-        }
-
-        private string GetStateFilePath(Screen monitor)
-        {
-            string safe = GetSafeFilePart(url ?? "WebOverlay");
-            string monitorKey = GetMonitorKey(monitor);
-            return Path.Combine(configDir, safe + "__monitor_" + monitorKey + ".txt");
-        }
-
-        private string GetLegacyStateFilePath()
-        {
             string safe = GetSafeFilePart(url ?? "WebOverlay");
             return Path.Combine(configDir, safe + ".txt");
+        }
+
+        private string GetLegacyMonitorStateFilePath()
+        {
+            string safe = GetSafeFilePart(url ?? "WebOverlay");
+            try
+            {
+                Screen current = Screen.FromHandle(Handle);
+                string monitorKey = GetMonitorKey(current);
+                string preferred = Path.Combine(configDir, safe + "__monitor_" + monitorKey + ".txt");
+                if (File.Exists(preferred))
+                    return preferred;
+            }
+            catch { }
+
+            try
+            {
+                return Directory.GetFiles(configDir, safe + "__monitor_*.txt")
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static string GetSafeFilePart(string value)
@@ -1304,42 +1167,24 @@ namespace WebOverlay
             return chars.Length == 0 ? "PRIMARY" : new string(chars);
         }
 
-        private static Screen GetDefaultEts2Screen()
-        {
-            try
-            {
-                var processes = Process.GetProcessesByName("eurotrucks2");
-                foreach (var process in processes)
-                {
-                    try
-                    {
-                        if (process.MainWindowHandle != IntPtr.Zero)
-                            return Screen.FromHandle(process.MainWindowHandle);
-                    }
-                    finally
-                    {
-                        process.Dispose();
-                    }
-                }
-            }
-            catch { }
-
-            return Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
-        }
-
         private void LoadState()
         {
-            Screen monitor;
-            try { monitor = Screen.FromHandle(Handle); }
-            catch { monitor = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault(); }
-
             _stateApplying = true;
             try
             {
-                if (!LoadStateForMonitor(monitor, allowLegacy: true))
+                if (!TryLoadStateFile(GetStateFilePath()))
                 {
-                    ApplyDefaultState(monitor);
-                    SaveStateForMonitor(monitor);
+                    string legacy = GetLegacyMonitorStateFilePath();
+                    if (!string.IsNullOrEmpty(legacy) && TryLoadStateFile(legacy))
+                    {
+                        SaveState();
+                        Log($"LoadState: migrated legacy monitor state {legacy} -> {GetStateFilePath()}");
+                    }
+                    else
+                    {
+                        ApplyDefaultState();
+                        SaveState();
+                    }
                 }
             }
             finally
@@ -1347,25 +1192,6 @@ namespace WebOverlay
                 _stateApplying = false;
                 _stateDirty = false;
             }
-        }
-
-        private bool LoadStateForMonitor(Screen monitor, bool allowLegacy)
-        {
-            string path = GetStateFilePath(monitor);
-            if (TryLoadStateFile(path))
-                return true;
-
-            if (allowLegacy)
-            {
-                string legacy = GetLegacyStateFilePath();
-                if (TryLoadStateFile(legacy))
-                {
-                    SaveStateForMonitor(monitor);
-                    return true;
-                }
-            }
-
-            return false;
         }
 
         private bool TryLoadStateFile(string path)
@@ -1399,23 +1225,22 @@ namespace WebOverlay
             }
         }
 
-        private void ApplyDefaultState(Screen monitor)
+        private void ApplyDefaultState()
         {
             _zoomFactor = 1.0;
 
-            var screen = monitor ?? Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
+            var screen = Screen.PrimaryScreen;
             if (screen == null)
             {
                 Size = new Size(800, 600);
                 Location = new Point(100, 100);
-                Log($"ApplyDefaultState: no screen, fallback 800x600 at 100,100 for {url}");
+                Log($"ApplyDefaultState: no primary screen, fallback 800x600 at 100,100 for {url}");
                 return;
             }
 
             var area = screen.WorkingArea;
             string normalizedUrl = (url ?? string.Empty).ToLowerInvariant();
 
-            // Help page keeps its existing dedicated layout.
             if (normalizedUrl.Contains("help.html"))
             {
                 Size = new Size(800, 1000);
@@ -1423,7 +1248,6 @@ namespace WebOverlay
                 int y = area.Top + 15;
                 Location = new Point(Math.Max(area.Left, x), Math.Max(area.Top, y));
             }
-            // PDA / minimap: square, bottom-left, 30% of working-area height.
             else if (normalizedUrl.Contains("web_pda_map.html"))
             {
                 int side = Math.Max(100, (int)Math.Round(area.Height * 0.30));
@@ -1431,7 +1255,6 @@ namespace WebOverlay
                 Size = new Size(side, side);
                 Location = new Point(area.Left, area.Bottom - side);
             }
-            // Hybrid UI: 42% of screen width, 32% of screen height, bottom-centre.
             else if (normalizedUrl.Contains("web_ui_hybrid.html"))
             {
                 int width = Math.Max(100, (int)Math.Round(area.Width * 0.42));
@@ -1443,7 +1266,6 @@ namespace WebOverlay
                 Size = new Size(width, height);
                 Location = new Point(x, y);
             }
-            // Pause mini-logo: square, top-right, 18% of working-area height.
             else if (normalizedUrl.Contains("web_pause_logo.html"))
             {
                 int side = Math.Max(100, (int)Math.Round(area.Height * 0.18));
@@ -1451,7 +1273,6 @@ namespace WebOverlay
                 Size = new Size(side, side);
                 Location = new Point(area.Right - side, area.Top);
             }
-            // Heights/debug view retains the documented top-right layout.
             else if (normalizedUrl.Contains("web_heights.html"))
             {
                 int width = Math.Max(100, (int)Math.Round(area.Width * 0.34));
@@ -1472,15 +1293,15 @@ namespace WebOverlay
             if (webView != null)
                 webView.ZoomFactor = _zoomFactor;
 
-            Log($"ApplyDefaultState: url={url}, monitor={screen.DeviceName}, location={Location.X},{Location.Y}, size={Width}x{Height}");
+            Log($"ApplyDefaultState: url={url}, location={Location.X},{Location.Y}, size={Width}x{Height}");
         }
 
-        private void SaveStateForMonitor(Screen monitor)
+        private void SaveState()
         {
             try
             {
                 Directory.CreateDirectory(configDir);
-                File.WriteAllLines(GetStateFilePath(monitor), new[]
+                File.WriteAllLines(GetStateFilePath(), new[]
                 {
                     Location.X.ToString(),
                     Location.Y.ToString(),
@@ -1488,21 +1309,6 @@ namespace WebOverlay
                     Width.ToString(),
                     Height.ToString()
                 }, Encoding.UTF8);
-            }
-            catch (Exception ex)
-            {
-                Log($"SaveStateForMonitor ошибка: {ex.Message}");
-            }
-        }
-
-        private void SaveState()
-        {
-            try
-            {
-                Screen monitor;
-                try { monitor = Screen.FromHandle(Handle); }
-                catch { monitor = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault(); }
-                SaveStateForMonitor(monitor);
             }
             catch (Exception ex)
             {
@@ -1595,7 +1401,6 @@ namespace WebOverlay
 
             if (y < screen.WorkingArea.Top)
             {
-                // At the top edge, place the signature below the window instead of covering its border.
                 y = Math.Min(owner.Bottom + 2, screen.WorkingArea.Bottom - Height);
                 if (y < screen.WorkingArea.Top)
                     y = screen.WorkingArea.Top;
@@ -1700,5 +1505,4 @@ namespace WebOverlay
             }
         }
     }
-
 }
