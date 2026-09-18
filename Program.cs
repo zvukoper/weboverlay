@@ -164,6 +164,12 @@ namespace WebOverlay
 
             Program.Log($"WindowManager: создано окно {url}, active={setActive}, всего окон {_windows.Count}");
             form.UpdateManipulationInfo();
+
+            // Для web_quests.html дополнительно поднимаем интерактивную
+            // input-поверхность (обычный HWND без color-key).
+            if (IsQuestUrl(url))
+                SyncInteractiveQuestInput(config, appDataDir);
+
             return form;
         }
 
@@ -191,6 +197,7 @@ namespace WebOverlay
             if (_windows.Count == 0)
             {
                 _activeIndex = -1;
+                DisposeInteractiveQuestInput();
                 return;
             }
 
@@ -300,6 +307,67 @@ namespace WebOverlay
                 try { w.SetLayerHidden(hidden); }
                 catch (Exception ex) { Program.Log($"SetAllLayersHidden error: {ex.Message}"); }
             }
+
+            // Интерактивная input-поверхность квестов живёт ОТДЕЛЬНЫМ окном без
+            // color-key и обязана прятаться вместе со слоями: иначе input-окно
+            // осталось бы висеть поверх пользовательских окон.
+            try { InteractiveQuestInput?.SetLayerHidden(hidden); }
+            catch (Exception ex) { Program.Log($"SetAllLayersHidden interactive error: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Интерактивная input-поверхность окна квестов. Создаётся лениво и
+        /// живёт столько же, сколько визуальное окно web_quests.html.
+        /// </summary>
+        internal static InteractiveQuestForm? InteractiveQuestInput { get; private set; }
+
+        private const string QuestPage = "web_quests.html";
+
+        internal static bool IsQuestUrl(string? url)
+            => !string.IsNullOrWhiteSpace(url) && url.Contains(QuestPage, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Пересоздаёт input-поверхность под текущее визуальное окно квестов.
+        /// ⛔ Отдельный HWND нужен потому что color-keyed визуальный слой Windows
+        /// исключает из desktop hit-test (см. InteractiveQuestForm).
+        /// </summary>
+        internal static void SyncInteractiveQuestInput(AppConfig config, string appDataDir)
+        {
+            try
+            {
+                var visual = _windows.FirstOrDefault(w =>
+                    w != null && !w.IsDisposed && IsQuestUrl(w.Url));
+
+                if (visual == null)
+                {
+                    if (InteractiveQuestInput != null)
+                    {
+                        try { InteractiveQuestInput.Dispose(); } catch { }
+                        InteractiveQuestInput = null;
+                        Program.Log("WindowManager: интерактивная input-поверхность квестов закрыта (нет визуального окна).");
+                    }
+                    return;
+                }
+
+                if (InteractiveQuestInput == null || InteractiveQuestInput.IsDisposed || InteractiveQuestInput.Url != visual.Url)
+                {
+                    var previous = InteractiveQuestInput;
+                    InteractiveQuestInput = new InteractiveQuestForm(visual.Url, config, visual);
+                    try { previous?.Dispose(); } catch { }
+                    Program.Log($"WindowManager: создана интерактивная input-поверхность квестов url={visual.Url}");
+                    InteractiveQuestInput.SetLayerHidden(_layersHidden);
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"SyncInteractiveQuestInput error: {ex.Message}");
+            }
+        }
+
+        private static void DisposeInteractiveQuestInput()
+        {
+            try { InteractiveQuestInput?.Dispose(); } catch { }
+            InteractiveQuestInput = null;
         }
 
         public static bool LayersHidden => _layersHidden;
@@ -319,6 +387,10 @@ namespace WebOverlay
                 return false;
 
             window.Close();
+
+            if (IsQuestUrl(targetUrl))
+                DisposeInteractiveQuestInput();
+
             return true;
         }
 
@@ -458,6 +530,16 @@ namespace WebOverlay
 
                 var thread = new Thread(StartPipeServer) { IsBackground = true };
                 thread.Start();
+
+                // ВРЕМЕННАЯ ДИАГНОСТИКА — оставлена только как наблюдение (§18).
+                GameWindowTracker.StartDiagnostic();
+
+                // Интерактивная input-поверхность квестов: если визуальное окно
+                // появится позже (оно создаётся командой append), периодический
+                // вызов поднимет input-окно под него.
+                var inputTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+                inputTimer.Tick += (_, _) => WindowManager.SyncInteractiveQuestInput(_config, _appDataDir);
+                inputTimer.Start();
 
                 Application.Run(firstWindow);
             }
@@ -785,6 +867,28 @@ namespace WebOverlay
         private bool _stateApplying;
 
         // ================================================================
+        // ВРЕМЕННАЯ ДИАГНОСТИКА ВВОДА (см. QuestInputDiagnostics.cs).
+        // Ничего не меняет в поведении: только чтение состояния и запись в лог.
+        // ================================================================
+        private System.Windows.Forms.Timer _diagCursorTimer;    // окно под курсором (100 мс)
+        private System.Windows.Forms.Timer _diagSnapshotTimer;  // сводка раз в секунду
+        private System.Windows.Forms.Timer _diagJsTimer;        // выемка строк из страницы
+        private IntPtr _diagLastUnderCursor;
+        private bool _diagUnderCursorLogged;
+        private bool _diagJsBusy;
+        private DateTime _diagLastSnapshotUtc = DateTime.MinValue;
+        private DateTime _diagLastNcHitLogUtc = DateTime.MinValue;
+        private string _diagLastNcHitKey = "";
+        private long _diagJsMoves, _diagJsClicks;
+        private long _diagJsMousedown;
+        private long _diagJsMouseUp;
+        private DateTime _diagLastPointsUtc = DateTime.MinValue;
+        private bool _diagJsDotShown;
+        private double _diagJsDotX, _diagJsDotY;
+        private bool _diagPaused, _diagCollapsed;
+        private int _diagWebViewLogged;
+
+        // ================================================================
         // КУРСОР ИНТЕРАКТИВНОГО ОВЕРЛЕЯ (v1.0.40.60)
         //
         // ПРОБЛЕМА: ETS2 со своим HUD скрывает системный курсор и рисует свой.
@@ -854,6 +958,8 @@ namespace WebOverlay
         public void SetCursorOwnership(bool owned)
         {
             owned = owned && IsSpecialClickThroughUrl(url);
+            // ДИАГНОСТИКА (только наблюдение): фиксируем фактические параметры.
+            QuestInputDiagnostics.Log($"[OVERLAY-DIAG] POST set_cursor value={owned} cursorOwned={_cursorOwned} showCursorCalls={_showCursorCalls} url={url}", true);
             if (owned == _cursorOwned)
                 return;
 
@@ -962,12 +1068,18 @@ namespace WebOverlay
             LoadState();
             ApplyClickability();
 
+            QuestInputDiagnostics.LogStartOnce();
+            InitializeInputDiagnostics();
             Shown += (s, e) =>
             {
                 TopMost = true;
                 SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                 // Стиль мыши применяется только после создания дескриптора.
-                ApplyClickability();
+                ApplyClickability("Shown");
+                // Визуальный слой квестов переводим на LWA_ALPHA именно ЗДЕСЬ:
+                // в конструкторе дескриптора ещё нет, и color-key остался бы
+                // активным, делая окно «мёртвым» для desktop hit-test.
+                ApplyVisualAlphaPath();
                 UpdateManipulationInfo();
             };
 
@@ -1071,7 +1183,8 @@ namespace WebOverlay
                 return;
 
             _hotspotCursorInside = inside;
-            ApplyClickThroughStyle(Handle, !inside);
+            QuestInputDiagnostics.State("hotspot cursor state", $"inside={inside} hotspot={_hotspot.X},{_hotspot.Y},{_hotspot.Width},{_hotspot.Height}");
+            ApplyClickThroughStyle(Handle, !inside, "UpdateHotspotCursorState");
         }
 
         /// <summary>
@@ -1106,6 +1219,491 @@ namespace WebOverlay
             {
                 string logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay", "debug.log");
                 File.AppendAllText(logPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - OverlayForm: {msg}{Environment.NewLine}");
+            }
+            catch { }
+        }
+
+        // ================================================================
+        // ВРЕМЕННАЯ ДИАГНОСТИКА ВВОДА — ТОЛЬКО НАБЛЮДЕНИЕ
+        // ================================================================
+        // Три независимых наблюдателя (никаких изменений поведения):
+        //   1) 100 мс — окно под курсором (WindowFromPoint), пишем только
+        //      при смене HWND/класса;
+        //   2) 1 с — агрегированный [SNAPSHOT] по окну и странице;
+        //   3) 400 мс — выемка диагностических строк, накопленных JS
+        //      (window.__questDiag.drain()) и запись их в
+        //      quest-input-diagnostic.log.
+        // Наблюдатели включаются ТОЛЬКО для интерактивных страниц: остальные
+        // окна слоя диагностика не трогает.
+        // ================================================================
+        private bool IsQuestInteractivePage =>
+            !string.IsNullOrWhiteSpace(url) && url.Contains("web_quests.html", StringComparison.OrdinalIgnoreCase);
+
+        internal bool DiagClickable => _clickable;
+        internal Rectangle DiagHotspot => _hotspot;
+        internal bool DiagNeedsClickThrough => NeedsClickThroughStyle;
+        internal bool DiagTransparentActual => (DiagExStyle & WS_EX_TRANSPARENT) != 0;
+        internal IntPtr DiagWebViewHandle => GetWebViewHandle();
+        /// <summary>Прямой диагностический WM_NCHITTEST (только чтение ответа).</summary>
+        internal long DiagDirectNcHitTest(Point screen)
+            => QuestInputDiagnostics.DirectNcHitTest(Handle, screen, _clickable, NeedsClickThroughStyle, GetContentName());
+
+        private int DiagExStyle => IsHandleCreated ? GetWindowLong(Handle, GWL_EXSTYLE) : 0;
+
+        private void InitializeInputDiagnostics()
+        {
+            if (!IsQuestInteractivePage)
+                return;
+
+            // Логика мыши квестов ЖИВЁТ В ОТДЕЛЬНОМ ОКНЕ (InteractiveQuestForm):
+            // color-keyed визуальный слой Windows в desktop hit-test не пускает.
+            // Поэтому здесь наблюдаем только hit-test, без старых clickability-
+            // переключений (они для quest больше не используются).
+            QuestInputDiagnostics.Log($"[OVERLAY-DIAG][INIT] url={url} formHwnd=0x{(IsHandleCreated ? Handle.ToInt64() : 0):X} handleCreated={IsHandleCreated} " +
+                $"clickable={_clickable} hotspot={_hotspot.X},{_hotspot.Y},{_hotspot.Width},{_hotspot.Height} needClickThrough={NeedsClickThroughStyle} " +
+                $"role={(IsQuestVisualOnly ? "visual-only (input via InteractiveQuestForm)" : "interactive")}");
+
+            _diagCursorTimer = new System.Windows.Forms.Timer { Interval = 100 };
+            _diagCursorTimer.Tick += (_, _) => DiagTickWindowUnderCursor();
+            _diagCursorTimer.Start();
+
+            _diagSnapshotTimer = new System.Windows.Forms.Timer { Interval = 750 };
+            _diagSnapshotTimer.Tick += (_, _) => DiagTickSnapshot();
+            _diagSnapshotTimer.Start();
+
+            _diagJsTimer = new System.Windows.Forms.Timer { Interval = 400 };
+            _diagJsTimer.Tick += (_, _) => _ = DiagTickPullJsAsync();
+            _diagJsTimer.Start();
+
+            // Разовый набор проб при старте: layered-атрибуты, z-order, окно игры
+            // и клиентская геометрия. Всё только на чтение.
+            DiagProbeOnce();
+        }
+
+        /// <summary>
+        /// Разовые диагностические пробы: [LAYERED], [ZORDER], [GAME-DIAG],
+        /// [GAME-DIAG][GEOMETRY], [OVERLAY-DIAG][GAME-BOUND].
+        /// ⛔ Ничего не меняет: только читает и пишет в лог.
+        /// </summary>
+        private void DiagProbeOnce()
+        {
+            try
+            {
+                IntPtr gameHwnd = QuestInputDiagnostics.FindGameWindow();
+                var gameProcess = QuestInputDiagnostics.FindGameProcess();
+
+                QuestInputDiagnostics.LayeredAttributes(Handle, BackColor, TransparencyKey, GetContentName());
+                QuestInputDiagnostics.ZOrder(Handle, TopMost, gameHwnd, GetContentName());
+                QuestInputDiagnostics.GameWindow(gameProcess, gameHwnd, "initial");
+
+                bool hasGame = QuestInputDiagnostics.GameClientRect(out QuestInputDiagnostics.RECT gameRect, out string detail);
+                QuestInputDiagnostics.GameGeometry(gameHwnd, gameRect, true, $"initial {detail}");
+
+                GetWindowRect(Handle, out QuestInputDiagnostics.RECT current);
+                QuestInputDiagnostics.GameBound(GetContentName(), Handle, current, hasGame, gameRect);
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log($"[OVERLAY-DIAG][INIT] probe error: {ex.Message}");
+            }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out QuestInputDiagnostics.RECT lpRect);
+
+        /// <summary>
+        /// [CHILD-HITTEST] в 4 диагностических точках: центр диалога, кнопка,
+        /// прозрачная область оверлея, область вне окна игры (задание №4).
+        /// Точки вычисляются от РЕАЛЬНОГО прямоугольника окна; ничего не меняют.
+        /// </summary>
+        private void DiagProbePoints()
+        {
+            try
+            {
+                if (!IsHandleCreated)
+                    return;
+
+                IntPtr webViewHwnd = GetWebViewHandle();
+                IntPtr gameHwnd = QuestInputDiagnostics.FindGameWindow();
+                GetWindowRect(Handle, out QuestInputDiagnostics.RECT wr);
+                var centre = new Point(wr.Left + wr.Width / 2, wr.Top + wr.Height / 2);
+
+                // 1) центр quest dialog (центр окна оверлея),
+                // 2) кнопка ответа (ниже центра, левая половина диалога),
+                // 3) прозрачная область оверлея (левый верхний угол),
+                // 4) область вне окна игры (правый нижний угол экрана).
+                QuestInputDiagnostics.ChildHitTest(Handle, webViewHwnd, centre, "quest-dialog-center");
+                QuestInputDiagnostics.ChildHitTest(Handle, webViewHwnd, new Point(wr.Left + wr.Width / 2, wr.Top + wr.Height * 3 / 4), "dialog-button-area");
+                QuestInputDiagnostics.ChildHitTest(Handle, webViewHwnd, new Point(wr.Left + 20, wr.Top + 20), "overlay-transparent-corner");
+
+                var virtualScreen = SystemInformation.VirtualScreen;
+                QuestInputDiagnostics.ChildHitTest(Handle, webViewHwnd,
+                    new Point(virtualScreen.Right - 10, virtualScreen.Bottom - 10), "outside-game-area");
+
+                QuestInputDiagnostics.ZOrder(Handle, TopMost, gameHwnd, GetContentName());
+
+                // ГЛАВНЫЙ недостающий замер: карта z-порядка и «кто владеет
+                // пикселем». Только чтение, курсор пользователя не требуется:
+                // берём и центр окна квестов, и фактическую позицию курсора.
+                QuestInputDiagnostics.ZMap(Handle, webViewHwnd, gameHwnd, centre, GetContentName(), "window-centre");
+                if (QuestInputDiagnostics.TryGetCursor(out Point cursorNow))
+                {
+                    QuestInputDiagnostics.ZMap(Handle, webViewHwnd, gameHwnd, cursorNow, GetContentName(), "actual-cursor");
+                }
+                QuestInputDiagnostics.ZMapTop(24, Handle, gameHwnd);
+
+                // ГЛАВНЫЙ оставшийся вопрос: исключение на уровне ОКНА или
+                // ПИКСЕЛЯ. Сетка WindowFromPoint по всему окну + проверка
+                // области окна (SetWindowRgn). Только чтение.
+                QuestInputDiagnostics.WindowRegion(Handle, GetContentName());
+                QuestInputDiagnostics.WindowRegion(webViewHwnd, GetContentName() + " (webView)");
+                QuestInputDiagnostics.DwmState(Handle, GetContentName());
+                QuestInputDiagnostics.DwmState(webViewHwnd, GetContentName() + " (webView)");
+                QuestInputDiagnostics.HitTestGrid(Handle, webViewHwnd, gameHwnd,
+                    new Rectangle(wr.Left, wr.Top, wr.Width, wr.Height), 7, GetContentName());
+
+                // Отдельно: сетка вокруг КНОПОК ДИАЛОГА, по которым не попадает
+                // игрок (правая половина окна, нижняя треть).
+                QuestInputDiagnostics.HitTestGrid(Handle, webViewHwnd, gameHwnd,
+                    new Rectangle(wr.Left + wr.Width / 2, wr.Top + wr.Height * 2 / 3, wr.Width / 2, wr.Height / 3),
+                    5, GetContentName() + " (dialog-buttons)");
+
+                // Доказательство глобальности механизма: та же сетка по ВСЕМ
+                // окнам слоя. Только чтение.
+                QuestInputDiagnostics.HitTestAllOverlays(5);
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log($"[OVERLAY-DIAG][CHILD-HITTEST] probe error: {ex.Message}");
+            }
+        }
+
+
+        /// <summary>
+        /// ПОСТОЯННОЕ ИСПРАВЛЕНИЕ: визуальный слой квестов переводится на
+        /// LWA_ALPHA вместо LWA_COLORKEY.
+        ///
+        /// ПРИЧИНА: окно с активным color-key Windows полностью исключает из
+        /// desktop hit-test. Мышь теперь принимает отдельное окно
+        /// InteractiveQuestForm, а визуальному слою hit-test больше не нужен —
+        /// снимаем color-key, чтобы окно не было «мёртвым» для системы.
+        ///
+        /// Прозрачность сохраняется: страница уже рисует прозрачный фон
+        /// (WebView2 DefaultBackgroundColor=Transparent), поэтому alpha=255
+        /// ничего не меняет визуально.
+        ///
+        /// ⛔ Остальные оверлеи (notifications, ar_hud и т.д.) НЕ трогаем:
+        /// их color-key/hotspot-механика остаётся как была.
+        /// </summary>
+        private void ApplyVisualAlphaPath()
+        {
+            try
+            {
+                if (!IsHandleCreated || !IsQuestInteractivePage)
+                    return;
+
+                BackColor = Color.Black;
+                TransparencyKey = Color.Empty;
+
+                // Держим WS_EX_LAYERED, снимаем WS_EX_TRANSPARENT, color-key
+                // заменяем на LWA_ALPHA(255).
+                int ex = GetWindowLong(Handle, GWL_EXSTYLE);
+                int desired = (ex | WS_EX_LAYERED) & ~WS_EX_TRANSPARENT;
+                if (desired != ex)
+                {
+                    SetWindowLong(Handle, GWL_EXSTYLE, desired);
+                    SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                }
+
+                SetLayeredWindowAttributes(Handle, 0, 255, LWA_ALPHA);
+
+                int actual = GetWindowLong(Handle, GWL_EXSTYLE);
+                QuestInputDiagnostics.Log($"[QUEST-FIX][VISUAL] url={url} exStyle=0x{actual:X8} layered={(actual & WS_EX_LAYERED) != 0} " +
+                    $"transparent={(actual & WS_EX_TRANSPARENT) != 0} colorKeyRemoved=True transparencyKey=0x{ColorTranslator.ToWin32(TransparencyKey):X8} " +
+                    $"backColor=0x{ColorTranslator.ToWin32(BackColor):X8} (LWA_ALPHA=255, прозрачность страницы сохранена)", true);
+            }
+            catch (Exception ex)
+            {
+                Log($"ApplyVisualAlphaPath error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// true у визуального слоя квестов: мышь принимает отдельное окно
+        /// InteractiveQuestForm, а этот слой только рисует картинку.
+        /// </summary>
+        internal bool IsQuestVisualOnly => IsQuestInteractivePage;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, int crKey, byte bAlpha, int dwFlags);
+
+        private const int LWA_ALPHA = 0x00000002;
+        private const int SWP_NOZORDER = 0x0004;
+        private const int SWP_NOACTIVATE = 0x0010;
+
+        /// <summary>Окно под курсором: пишем только когда HWND/класс изменился.</summary>
+        private void DiagTickWindowUnderCursor()
+        {
+            try
+            {
+                if (!IsHandleCreated || !QuestInputDiagnostics.TryGetCursor(out Point pt))
+                    return;
+
+                IntPtr under = QuestInputDiagnostics.WindowAt(pt);
+                IntPtr webViewHwnd = GetWebViewHandle();
+                bool same = under == _diagLastUnderCursor && _diagUnderCursorLogged;
+                if (same)
+                    return;
+
+                _diagLastUnderCursor = under;
+                _diagUnderCursorLogged = true;
+                QuestInputDiagnostics.WindowUnderCursor(pt, under, Handle, webViewHwnd, true);
+            }
+            catch { }
+        }
+
+        private async System.Threading.Tasks.Task DiagTickPullJsAsync()
+        {
+            if (_diagJsBusy)
+                return;
+            _diagJsBusy = true;
+            try
+            {
+                var core = webView?.CoreWebView2;
+                if (core == null)
+                    return;
+
+                // ExecuteScriptAsync сам возвращает результат как JSON-строку,
+                // поэтому скрипт отдаёт ОБЪЕКТ/МАССИВ напрямую (без JSON.stringify —
+                // иначе получилась бы двойная кодировка).
+                string raw = await core.ExecuteScriptAsync(
+                    "(window.__questDiag && window.__questDiag.drain && window.__questDiag.drain()) || []").ConfigureAwait(true);
+                WriteJsLines(raw);
+
+                string counters = await core.ExecuteScriptAsync(
+                    "(window.__questDiag && window.__questDiag.snapshot && window.__questDiag.snapshot()) || null").ConfigureAwait(true);
+                ApplyJsCounters(counters);
+            }
+            catch { }
+            finally
+            {
+                _diagJsBusy = false;
+            }
+        }
+
+        private static void WriteJsLines(string json)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(json) || json == "null")
+                    return;
+
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    return;
+
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.Object &&
+                        item.TryGetProperty("l", out JsonElement line) &&
+                        line.ValueKind == JsonValueKind.String)
+                    {
+                        QuestInputDiagnostics.LogJs(line.GetString() ?? "");
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ApplyJsCounters(string json)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(json) || json == "null")
+                    return;
+
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                    return;
+
+                long moves = ReadLong(root, "mouseMove");
+                long clicks = ReadLong(root, "click");
+                long downs = ReadLong(root, "mouseDown");
+                long ups = ReadLong(root, "mouseUp");
+                string lastMove = ReadNum(root, "lastX") + "," + ReadNum(root, "lastY") + " target=" + ReadString(root, "lastTarget");
+
+                // [DOM-SUMMARY] пишем только при изменении счётчиков — иначе
+                // выемка раз в 400 мс заливала бы лог одинаковыми строками.
+                if (moves != _diagJsMoves || clicks != _diagJsClicks || downs != _diagJsMousedown || ups != _diagJsMouseUp)
+                {
+                    QuestInputDiagnostics.DomSummary(moves, downs, ups, clicks, lastMove, _diagPaused, _diagCollapsed);
+                }
+
+                _diagJsMoves = moves;
+                _diagJsClicks = clicks;
+                _diagJsMousedown = downs;
+                _diagJsMouseUp = ups;
+                _diagJsDotShown = ReadBool(root, "cursorDotShown");
+                _diagJsDotX = ReadDouble(root, "cursorDotX");
+                _diagJsDotY = ReadDouble(root, "cursorDotY");
+                // paused/collapsed берём ИЗ СТРАНИЦЫ (фактическое состояние, а не предположение).
+                _diagPaused = ReadBool(root, "paused");
+                _diagCollapsed = ReadBool(root, "collapsed");
+            }
+            catch { }
+        }
+
+        private static long ReadLong(JsonElement root, string name)
+            => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out long r) ? r : 0;
+
+        private static string ReadNum(JsonElement root, string name)
+            => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetRawText() : "?";
+
+        private static double ReadDouble(JsonElement root, string name)
+            => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : double.NaN;
+
+        private static bool ReadBool(JsonElement root, string name)
+            => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+
+        private static string ReadString(JsonElement root, string name)
+            => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? (v.GetString() ?? "") : "";
+
+        /// <summary>
+        /// Главная агрегированная строка [INPUT-SNAPSHOT] (задание №9).
+        /// Раз в 750 мс, пока окно развёрнуто; иначе реже. Ничего не меняет:
+        /// все пробы — только чтение (включая прямой диагностический
+        /// WM_NCHITTEST, результат которого не используется).
+        /// </summary>
+        private void DiagTickSnapshot()
+        {
+            try
+            {
+                if (!IsHandleCreated)
+                    return;
+
+                var now = DateTime.UtcNow;
+                bool active = _diagPaused && !_diagCollapsed;
+                double intervalMs = active ? 750 : 3000;
+                if ((now - _diagLastSnapshotUtc).TotalMilliseconds < intervalMs)
+                    return;
+                _diagLastSnapshotUtc = now;
+
+                if (!QuestInputDiagnostics.TryGetCursor(out Point pt))
+                    return;
+
+                IntPtr webViewHwnd = GetWebViewHandle();
+                IntPtr gameHwnd = QuestInputDiagnostics.FindGameWindow();
+                IntPtr under = QuestInputDiagnostics.WindowAt(pt);
+
+                // Прямой диагностический WM_NCHITTEST к нашему HWND. Возвращённое
+                // значение только логируется и сравнивается с WindowFromPoint.
+                long directNcHit = QuestInputDiagnostics.DirectNcHitTest(Handle, pt, _clickable, NeedsClickThroughStyle, GetContentName());
+
+                int ex = DiagExStyle;
+                bool hasColorKey = false;
+                uint colorKey = 0;
+                if ((ex & WS_EX_LAYERED) != 0)
+                {
+                    try { hasColorKey = GetLayeredWindowAttributes(Handle, out colorKey, out _, out _); }
+                    catch { }
+                }
+
+                QuestInputDiagnostics.InputSnapshot(
+                    GetContentName(),
+                    Handle,
+                    webViewHwnd,
+                    gameHwnd,
+                    pt,
+                    under,
+                    directNcHit,
+                    QuestInputDiagnostics.WmNcHitTestCount,
+                    QuestInputDiagnostics.WmNcHitTestRealCount,
+                    _clickable,
+                    NeedsClickThroughStyle,
+                    (ex & WS_EX_TRANSPARENT) != 0,
+                    (ex & WS_EX_LAYERED) != 0,
+                    (ex & WS_EX_NOACTIVATE) != 0,
+                    hasColorKey,
+                    colorKey,
+                    webView?.Visible ?? false,
+                    webView?.Enabled ?? false,
+                    _diagJsMoves,
+                    _diagJsMousedown,
+                    _diagJsMouseUp,
+                    _diagJsClicks,
+                    TopMost);
+
+                // Точки, z-order и карта z-порядка — раз в 3 с (не часть главной
+                // строки). От положения курсора НЕ зависят.
+                if ((now - _diagLastPointsUtc).TotalSeconds >= 3)
+                {
+                    _diagLastPointsUtc = now;
+                    DiagProbePoints();
+                }
+            }
+            catch { }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint crKey, out byte bAlpha, out uint dwFlags);
+
+        private static string FindGameWindowText()
+        {
+            try
+            {
+                IntPtr hwnd = QuestInputDiagnostics.FindGameWindow();
+                return hwnd == IntPtr.Zero ? "0" : $"0x{hwnd.ToInt64():X}";
+            }
+            catch { }
+            return "0";
+        }
+
+        private IntPtr GetWebViewHandle()
+        {
+            try { return webView != null && webView.IsHandleCreated ? webView.Handle : IntPtr.Zero; }
+            catch { return IntPtr.Zero; }
+        }
+
+        /// <summary>[WEBVIEW] пишем один раз, когда дескриптор готов.</summary>
+        private void DiagLogWebViewOnce()
+        {
+            if (!IsQuestInteractivePage || Interlocked.Exchange(ref _diagWebViewLogged, 1) != 0)
+                return;
+
+            try
+            {
+                var view = webView;
+                QuestInputDiagnostics.WebViewInfo(
+                    Handle,
+                    view != null && view.IsHandleCreated ? view.Handle : IntPtr.Zero,
+                    view?.IsHandleCreated ?? false,
+                    view?.Visible ?? false,
+                    view?.Enabled ?? false,
+                    view?.Bounds ?? Rectangle.Empty,
+                    GetContentName());
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// [NCHITTEST] — только для страницы квестов и не чаще 2 раз в секунду.
+        /// WM_NCHITTEST приходит очень часто; ключ (результат + грубая сетка
+        /// координат) отсекает одинаковые проходы, чтобы не залить лог.
+        /// </summary>
+        private void DiagLogNcHitTest(Point screen, string result)
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                string key = result + "|" + (screen.X / 16) + "|" + (screen.Y / 16);
+                if (key == _diagLastNcHitKey && (now - _diagLastNcHitLogUtc).TotalMilliseconds < 500)
+                    return;
+
+                _diagLastNcHitKey = key;
+                _diagLastNcHitLogUtc = now;
+                QuestInputDiagnostics.NcHitTest(Handle, screen, _clickable, _hotspot, result);
             }
             catch { }
         }
@@ -1152,6 +1750,7 @@ namespace WebOverlay
                         webView.ZoomFactor = _zoomFactor;
                         webView.Visible = _manipulationMode || _contentVisible;
                         webView.BringToFront();
+                        DiagLogWebViewOnce();
                         if (_manipulationMode)
                             DebugShowIfAvailable();
                     }
@@ -1380,43 +1979,63 @@ namespace WebOverlay
             _clickable = !_clickable;
             _config.Clickable = _clickable;
             Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
-            ApplyClickability();
+            QuestInputDiagnostics.State("hotkey toggle", $"clickable={_clickable} url={url}");
+            ApplyClickability("ToggleClickable");
             UpdateManipulationInfo();
             Log($"ToggleClickable: {_clickable}");
             System.Media.SystemSounds.Beep.Play();
         }
 
-        private void ApplyClickability()
+        private void ApplyClickability(string source = "ApplyClickability")
         {
             Enabled = true;
+
+            // Для визуального слоя квестов click-through БОЛЬШЕ НЕ ПЕРЕКЛЮЧАЕТСЯ:
+            // мышь принимает отдельное окно InteractiveQuestForm, а color-key у
+            // этого слоя снят (см. ApplyVisualAlphaPath). Любое переключение
+            // здесь вернуло бы color-key и убило hit-test интерактивного окна.
+            if (IsQuestInteractivePage)
+            {
+                QuestInputDiagnostics.State("ApplyClickability", $"source={source} SKIPPED (quest visual layer is visual-only)");
+                return;
+            }
+
+            QuestInputDiagnostics.State("ApplyClickability", $"source={source} clickable={_clickable} needsClickThrough={NeedsClickThroughStyle}");
             SetClickThrough(NeedsClickThroughStyle);
         }
 
         public void SetNativeClickability(bool clickable)
         {
-            // Only the explicitly interactive pages may take mouse input; every
-            // other overlay always stays click-through.
-            _clickable = clickable && IsSpecialClickThroughUrl(url);
+            // For the quest visual layer clickability is never switched: mouse is
+            // handled by InteractiveQuestForm and this layer must keep LWA_ALPHA.
+            _clickable = !IsQuestInteractivePage && clickable && IsSpecialClickThroughUrl(url);
+            QuestInputDiagnostics.Log($"[OVERLAY-DIAG] POST set_clickable value={clickable} actualClickable={_clickable} url={url}", true);
+            QuestInputDiagnostics.State("set_clickable", $"value={clickable} actual={_clickable}");
             if (_clickable)
             {
                 _hotspot = Rectangle.Empty;
                 _hotspotCursorInside = false;
                 UpdateHotspotTimerState();
+                QuestInputDiagnostics.State("hotspot cleared", "reason=set_clickable(true)");
             }
 
             SetClickThrough(NeedsClickThroughStyle);
+            QuestInputDiagnostics.Clickable("SetNativeClickability", GetContentName(), clickable, _clickable, _hotspot, NeedsClickThroughStyle);
             UpdateManipulationInfo();
         }
 
         public void SetClickableHotspot(int x, int y, int width, int height)
         {
+            QuestInputDiagnostics.Log($"[OVERLAY-DIAG] POST set_clickable_hotspot x={x} y={y} w={width} h={height}", true);
             if (width <= 0 || height <= 0)
             {
                 _hotspot = Rectangle.Empty;
                 _hotspotCursorInside = false;
                 UpdateHotspotTimerState();
+                QuestInputDiagnostics.State("hotspot cleared", $"requested x={x} y={y} w={width} h={height}");
                 if (IsHandleCreated)
-                    ApplyClickThroughStyle(Handle, NeedsClickThroughStyle);
+                    ApplyClickThroughStyle(Handle, NeedsClickThroughStyle, "SetClickableHotspot(clear)");
+                QuestInputDiagnostics.Clickable("SetClickableHotspot", GetContentName(), _clickable, _clickable, _hotspot, NeedsClickThroughStyle);
                 return;
             }
 
@@ -1426,8 +2045,10 @@ namespace WebOverlay
             // (см. UpdateHotspotCursorState): мышь принимается только над закладкой.
             _hotspotCursorInside = IsHotspotCursorInside();
             UpdateHotspotTimerState();
+            QuestInputDiagnostics.State("hotspot set", $"x={x} y={y} w={width} h={height} cursorInside={_hotspotCursorInside}");
             if (IsHandleCreated)
-                ApplyClickThroughStyle(Handle, !_hotspotCursorInside);
+                ApplyClickThroughStyle(Handle, !_hotspotCursorInside, "SetClickableHotspot(set)");
+            QuestInputDiagnostics.Clickable("SetClickableHotspot", GetContentName(), _clickable, _clickable, _hotspot, NeedsClickThroughStyle);
             UpdateManipulationInfo();
         }
 
@@ -1521,7 +2142,9 @@ namespace WebOverlay
             if (!IsHandleCreated)
                 return;
 
-            if (ApplyClickThroughStyle(Handle, enable))
+            QuestInputDiagnostics.Log($"[OVERLAY-DIAG] POST set_clickthrough enable={enable} url={url}", true);
+            
+            if (ApplyClickThroughStyle(Handle, enable, "SetClickThrough"))
                 Log($"SetClickThrough: {enable}");
         }
 
@@ -1535,6 +2158,9 @@ namespace WebOverlay
         /// surface and is perceived as the overlay blinking.
         /// </summary>
         internal static bool ApplyClickThroughStyle(IntPtr handle, bool clickThrough)
+            => ApplyClickThroughStyle(handle, clickThrough, "unknown");
+
+        internal static bool ApplyClickThroughStyle(IntPtr handle, bool clickThrough, string source)
         {
             if (handle == IntPtr.Zero)
                 return false;
@@ -1549,8 +2175,11 @@ namespace WebOverlay
             if (desired == exStyle)
                 return false;
 
+            // Стиль пишем, затем ЧИТАЕМ ЕГО ОБРАТНО: SetWindowLong может не
+            // примениться, поэтому в лог идёт фактическое значение.
             SetWindowLong(handle, GWL_EXSTYLE, desired);
             SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+            QuestInputDiagnostics.StyleChange(handle, exStyle, desired, clickThrough, source);
 
             // WS_EX_TRANSPARENT alone does not re-evaluate the CACHED window under
             // the cursor, so after a click-through toggle the window would keep
@@ -1891,6 +2520,9 @@ namespace WebOverlay
                 // Свёрнутый интерактив НЕ кликабелен целиком: мышь принимает
                 // только «горячая область» — закладка у левой границы экрана.
                 // Поэтому сначала проверяем область, и лишь потом — общий флаг.
+                bool diagQuest = IsQuestInteractivePage;
+                var diagPt = new Point(unchecked((short)(long)m.LParam), unchecked((short)((long)m.LParam >> 16)));
+                string diagResult = "HTCLIENT(base)";
                 if (!_hotspot.IsEmpty)
                 {
                     // WM_NCHITTEST reports screen coordinates for a top-level window.
@@ -1898,14 +2530,32 @@ namespace WebOverlay
                     ScreenToClient(Handle, ref pt);
                     if (!_hotspot.Contains(pt))
                     {
+                        if (diagQuest) DiagLogNcHitTest(diagPt, "HTTRANSPARENT(hotspot-miss)");
                         m.Result = new IntPtr(HTTRANSPARENT);
                         return;
                     }
+                    diagResult = "HTCLIENT(hotspot-hit)";
                 }
                 else if (!_clickable)
                 {
+                    if (diagQuest) DiagLogNcHitTest(diagPt, "HTTRANSPARENT(not-clickable)");
                     m.Result = new IntPtr(HTTRANSPARENT);
                     return;
+                }
+
+                if (diagQuest)
+                {
+                    // ДИАГНОСТИКА (только наблюдение): реальный проход WndProc +
+                    // результат, который мы отдали бы дальше. Поведение не меняется.
+                    var probePt = new Point(unchecked((short)(long)m.LParam), unchecked((short)((long)m.LParam >> 16)));
+                    bool inside = false;
+                    if (!_hotspot.IsEmpty)
+                    {
+                        var c = probePt;
+                        ScreenToClient(Handle, ref c);
+                        inside = _hotspot.Contains(c);
+                    }
+                    QuestInputDiagnostics.WmNcHitTestReceived(Handle, probePt, _clickable, _hotspot.IsEmpty, inside, diagResult);
                 }
             }
 

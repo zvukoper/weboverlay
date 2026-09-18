@@ -46,6 +46,7 @@ namespace WebOverlay
             public bool ClickThrough = true;
             public DateTime LastRepairUtc = DateTime.MinValue;
             public DateTime LastForceRepaintUtc = DateTime.MinValue;
+            public DateTime LastDiagLogUtc = DateTime.MinValue;
         }
 
         [ModuleInitializer]
@@ -98,8 +99,16 @@ namespace WebOverlay
                 return false;
 
             string normalized = url.ToLowerInvariant();
-            return normalized.Contains("web_quests.html") ||
-                   normalized.Contains("web_notifications.html") ||
+
+            // ⛔ web_quests.html ИСКЛЮЧЁН (v1.0.40.63): его визуальный слой переведён
+            // на LWA_ALPHA, а color-key здесь НЕДОПУСТИМ — окно с активным
+            // LWA_COLORKEY Windows исключает из desktop hit-test, и мышь перестаёт
+            // доходить до интерактивного окна (InteractiveQuestForm). Этот repair
+            // иначе вернул бы color-key обратно.
+            if (normalized.Contains("web_quests.html"))
+                return false;
+
+            return normalized.Contains("web_notifications.html") ||
                    normalized.Contains("web_ar_hud.html");
         }
 
@@ -168,7 +177,19 @@ namespace WebOverlay
             }
 
             // Repairs any style drift (OverlayForm owns the intended state).
-            OverlayForm.ApplyClickThroughStyle(window.Handle, clickThrough);
+            OverlayForm.ApplyClickThroughStyle(window.Handle, clickThrough, "OverlayTransparencyFix");
+
+            // ДИАГНОСТИКА: "actual WS_EX_TRANSPARENT" и changed — важны для
+            // поиска «кто-то снова сделал окно click-through». Алгоритм repair
+            // НЕ меняется, дополнительных записей стиля НЕ делаем.
+            // Пишем при смене состояния или не чаще раза в 2 секунды.
+            if (changed || (now - state.LastDiagLogUtc).TotalMilliseconds >= 2000)
+            {
+                state.LastDiagLogUtc = now;
+                QuestInputDiagnostics.Log($"[OVERLAY-DIAG][TRANSPARENCY-FIX] url={window.Url} clickable={clickable} clickThrough={clickThrough} " +
+                    $"actualTransparent={window.DiagTransparentActual} needsClickThrough={window.DiagNeedsClickThrough} changed={changed} " +
+                    $"exstyle={QuestInputDiagnostics.ExStyleText(window.Handle)}");
+            }
 
             // Repair the colour key only when it actually drifted. Writing
             // SetLayeredWindowAttributes unconditionally repainted the layered
@@ -191,7 +212,6 @@ namespace WebOverlay
             {
                 Program.Log($"OverlayTransparencyFix: {window.Url} clickable={clickable} hotspot={(window.NeedsClickThroughStyle ? "off" : "on")} clickThrough={clickThrough}");
             }
-
             // A forced repaint every 100 ms kept the page compositing alive but
             // also caused the visible flashing. Repaint only on a real state
             // change: a timer-driven Invalidate hits the whole layered surface
