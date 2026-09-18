@@ -100,15 +100,13 @@ namespace WebOverlay
 
             string normalized = url.ToLowerInvariant();
 
-            // ⛔ web_quests.html ИСКЛЮЧЁН (v1.0.40.63): его визуальный слой переведён
-            // на LWA_ALPHA, а color-key здесь НЕДОПУСТИМ — окно с активным
-            // LWA_COLORKEY Windows исключает из desktop hit-test, и мышь перестаёт
-            // доходить до интерактивного окна (InteractiveQuestForm). Этот repair
-            // иначе вернул бы color-key обратно.
-            if (normalized.Contains("web_quests.html"))
-                return false;
-
-            return normalized.Contains("web_notifications.html") ||
+            // FIX v3 §12: web_quests.html СНОВА обслуживается color-key repair.
+            // Визуальный слой квестов вернулся на BackColor/TransparencyKey = Lime,
+            // и этот repair нужен ему, чтобы цветовой ключ не «уплывал».
+            // Мышь принимает отдельный InteractiveQuestForm, поэтому для quest
+            // clickThrough ВСЕГДА TRUE (см. Apply ниже).
+            return normalized.Contains("web_quests.html") ||
+                   normalized.Contains("web_notifications.html") ||
                    normalized.Contains("web_ar_hud.html");
         }
 

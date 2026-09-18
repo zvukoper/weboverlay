@@ -870,13 +870,12 @@ namespace WebOverlay
         // ВРЕМЕННАЯ ДИАГНОСТИКА ВВОДА (см. QuestInputDiagnostics.cs).
         // Ничего не меняет в поведении: только чтение состояния и запись в лог.
         // ================================================================
-        private System.Windows.Forms.Timer _diagCursorTimer;    // окно под курсором (100 мс)
-        private System.Windows.Forms.Timer _diagSnapshotTimer;  // сводка раз в секунду
-        private System.Windows.Forms.Timer _diagJsTimer;        // выемка строк из страницы
+        // ================================================================
+        private System.Windows.Forms.Timer _diagCursorTimer;
+        private System.Windows.Forms.Timer _diagJsTimer;
         private IntPtr _diagLastUnderCursor;
         private bool _diagUnderCursorLogged;
         private bool _diagJsBusy;
-        private DateTime _diagLastSnapshotUtc = DateTime.MinValue;
         private DateTime _diagLastNcHitLogUtc = DateTime.MinValue;
         private string _diagLastNcHitKey = "";
         private long _diagJsMoves, _diagJsClicks;
@@ -1076,10 +1075,12 @@ namespace WebOverlay
                 SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                 // Стиль мыши применяется только после создания дескриптора.
                 ApplyClickability("Shown");
-                // Визуальный слой квестов переводим на LWA_ALPHA именно ЗДЕСЬ:
-                // в конструкторе дескриптора ещё нет, и color-key остался бы
-                // активным, делая окно «мёртвым» для desktop hit-test.
-                ApplyVisualAlphaPath();
+                // FIX v3: визуальный слой квестов остаётся на прежнем
+                // color-key пути (BackColor/TransparencyKey = Lime) — он
+                // visual-only, мышь принимает InteractiveQuestForm.
+                // После подъёма визуального окна input-поверхность обязана снова
+                // оказаться ВЫШЕ него (§23).
+                RaiseQuestInputAbove();
                 UpdateManipulationInfo();
             };
 
@@ -1263,20 +1264,17 @@ namespace WebOverlay
                 $"clickable={_clickable} hotspot={_hotspot.X},{_hotspot.Y},{_hotspot.Width},{_hotspot.Height} needClickThrough={NeedsClickThroughStyle} " +
                 $"role={(IsQuestVisualOnly ? "visual-only (input via InteractiveQuestForm)" : "interactive")}");
 
+            // FIX v3 §7: геометрию input-окна присылает САМА визуальная страница
+            // (единственный WebView2) — второго WebView2 больше нет.
+            // §15/§24: JS-строки диагностики продолжаем выгружать.
             _diagCursorTimer = new System.Windows.Forms.Timer { Interval = 100 };
             _diagCursorTimer.Tick += (_, _) => DiagTickWindowUnderCursor();
             _diagCursorTimer.Start();
-
-            _diagSnapshotTimer = new System.Windows.Forms.Timer { Interval = 750 };
-            _diagSnapshotTimer.Tick += (_, _) => DiagTickSnapshot();
-            _diagSnapshotTimer.Start();
 
             _diagJsTimer = new System.Windows.Forms.Timer { Interval = 400 };
             _diagJsTimer.Tick += (_, _) => _ = DiagTickPullJsAsync();
             _diagJsTimer.Start();
 
-            // Разовый набор проб при старте: layered-атрибуты, z-order, окно игры
-            // и клиентская геометрия. Всё только на чтение.
             DiagProbeOnce();
         }
 
@@ -1380,60 +1378,42 @@ namespace WebOverlay
 
 
         /// <summary>
-        /// ПОСТОЯННОЕ ИСПРАВЛЕНИЕ: визуальный слой квестов переводится на
-        /// LWA_ALPHA вместо LWA_COLORKEY.
-        ///
-        /// ПРИЧИНА: окно с активным color-key Windows полностью исключает из
-        /// desktop hit-test. Мышь теперь принимает отдельное окно
-        /// InteractiveQuestForm, а визуальному слою hit-test больше не нужен —
-        /// снимаем color-key, чтобы окно не было «мёртвым» для системы.
-        ///
-        /// Прозрачность сохраняется: страница уже рисует прозрачный фон
-        /// (WebView2 DefaultBackgroundColor=Transparent), поэтому alpha=255
-        /// ничего не меняет визуально.
-        ///
-        /// ⛔ Остальные оверлеи (notifications, ar_hud и т.д.) НЕ трогаем:
-        /// их color-key/hotspot-механика остаётся как была.
-        /// </summary>
-        private void ApplyVisualAlphaPath()
-        {
-            try
-            {
-                if (!IsHandleCreated || !IsQuestInteractivePage)
-                    return;
-
-                BackColor = Color.Black;
-                TransparencyKey = Color.Empty;
-
-                // Держим WS_EX_LAYERED, снимаем WS_EX_TRANSPARENT, color-key
-                // заменяем на LWA_ALPHA(255).
-                int ex = GetWindowLong(Handle, GWL_EXSTYLE);
-                int desired = (ex | WS_EX_LAYERED) & ~WS_EX_TRANSPARENT;
-                if (desired != ex)
-                {
-                    SetWindowLong(Handle, GWL_EXSTYLE, desired);
-                    SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                }
-
-                SetLayeredWindowAttributes(Handle, 0, 255, LWA_ALPHA);
-
-                int actual = GetWindowLong(Handle, GWL_EXSTYLE);
-                QuestInputDiagnostics.Log($"[QUEST-FIX][VISUAL] url={url} exStyle=0x{actual:X8} layered={(actual & WS_EX_LAYERED) != 0} " +
-                    $"transparent={(actual & WS_EX_TRANSPARENT) != 0} colorKeyRemoved=True transparencyKey=0x{ColorTranslator.ToWin32(TransparencyKey):X8} " +
-                    $"backColor=0x{ColorTranslator.ToWin32(BackColor):X8} (LWA_ALPHA=255, прозрачность страницы сохранена)", true);
-            }
-            catch (Exception ex)
-            {
-                Log($"ApplyVisualAlphaPath error: {ex.Message}");
-            }
-        }
-
         /// <summary>
         /// true у визуального слоя квестов: мышь принимает отдельное окно
         /// InteractiveQuestForm, а этот слой только рисует картинку.
         /// </summary>
         internal bool IsQuestVisualOnly => IsQuestInteractivePage;
+
+        /// <summary>
+        /// FIX v3 (§13): пересылка native mouse-события в ОРИГИНАЛЬНУЮ страницу
+        /// квестов через штатный WebView2 API `PostWebMessageAsJson`.
+        ///
+        /// ⛔ НЕ используем ExecuteScriptAsync на каждое движение: сообщения
+        /// асинхронны, не порождают постоянный JS-injection, и rate легко
+        /// контролировать.
+        /// </summary>
+        internal void PostQuestInput(object payload)
+        {
+            try
+            {
+                var core = webView?.CoreWebView2;
+                if (core == null)
+                    return;
+
+                string json = System.Text.Json.JsonSerializer.Serialize(payload);
+                core.PostWebMessageAsJson(json);
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log($"[QUEST-FIX][FORWARD] post error: {ex.Message}");
+            }
+        }
+
+        /// <summary>input-окно всегда должно быть выше визуального слоя (§9).</summary>
+        internal void RaiseQuestInputAbove()
+        {
+            try { WindowManager.InteractiveQuestInput?.RaiseAboveVisual(); } catch { }
+        }
 
         [DllImport("user32.dll")]
         private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, int crKey, byte bAlpha, int dwFlags);
@@ -1575,80 +1555,6 @@ namespace WebOverlay
         /// Раз в 750 мс, пока окно развёрнуто; иначе реже. Ничего не меняет:
         /// все пробы — только чтение (включая прямой диагностический
         /// WM_NCHITTEST, результат которого не используется).
-        /// </summary>
-        private void DiagTickSnapshot()
-        {
-            try
-            {
-                if (!IsHandleCreated)
-                    return;
-
-                var now = DateTime.UtcNow;
-                bool active = _diagPaused && !_diagCollapsed;
-                double intervalMs = active ? 750 : 3000;
-                if ((now - _diagLastSnapshotUtc).TotalMilliseconds < intervalMs)
-                    return;
-                _diagLastSnapshotUtc = now;
-
-                if (!QuestInputDiagnostics.TryGetCursor(out Point pt))
-                    return;
-
-                IntPtr webViewHwnd = GetWebViewHandle();
-                IntPtr gameHwnd = QuestInputDiagnostics.FindGameWindow();
-                IntPtr under = QuestInputDiagnostics.WindowAt(pt);
-
-                // Прямой диагностический WM_NCHITTEST к нашему HWND. Возвращённое
-                // значение только логируется и сравнивается с WindowFromPoint.
-                long directNcHit = QuestInputDiagnostics.DirectNcHitTest(Handle, pt, _clickable, NeedsClickThroughStyle, GetContentName());
-
-                int ex = DiagExStyle;
-                bool hasColorKey = false;
-                uint colorKey = 0;
-                if ((ex & WS_EX_LAYERED) != 0)
-                {
-                    try { hasColorKey = GetLayeredWindowAttributes(Handle, out colorKey, out _, out _); }
-                    catch { }
-                }
-
-                QuestInputDiagnostics.InputSnapshot(
-                    GetContentName(),
-                    Handle,
-                    webViewHwnd,
-                    gameHwnd,
-                    pt,
-                    under,
-                    directNcHit,
-                    QuestInputDiagnostics.WmNcHitTestCount,
-                    QuestInputDiagnostics.WmNcHitTestRealCount,
-                    _clickable,
-                    NeedsClickThroughStyle,
-                    (ex & WS_EX_TRANSPARENT) != 0,
-                    (ex & WS_EX_LAYERED) != 0,
-                    (ex & WS_EX_NOACTIVATE) != 0,
-                    hasColorKey,
-                    colorKey,
-                    webView?.Visible ?? false,
-                    webView?.Enabled ?? false,
-                    _diagJsMoves,
-                    _diagJsMousedown,
-                    _diagJsMouseUp,
-                    _diagJsClicks,
-                    TopMost);
-
-                // Точки, z-order и карта z-порядка — раз в 3 с (не часть главной
-                // строки). От положения курсора НЕ зависят.
-                if ((now - _diagLastPointsUtc).TotalSeconds >= 3)
-                {
-                    _diagLastPointsUtc = now;
-                    DiagProbePoints();
-                }
-            }
-            catch { }
-        }
-
-        [DllImport("user32.dll")]
-        private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint crKey, out byte bAlpha, out uint dwFlags);
-
         private static string FindGameWindowText()
         {
             try
@@ -1814,6 +1720,19 @@ namespace WebOverlay
                                         int hh = payload.TryGetValue("h", out var jh) ? jh.GetInt32() : 0;
                                         SetClickableHotspot(hx, hy, hw, hh);
                                     }
+                                }
+                                else if (string.Equals(name, "set_interactive_bounds", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    // FIX v3 §7: геометрия native input-окна.
+                                    // Приходит из ЕДИНСТВЕННОЙ визуальной страницы.
+                                    string mode = payload.TryGetValue("mode", out var mv) && mv.ValueKind == JsonValueKind.String
+                                        ? mv.GetString() ?? "hidden"
+                                        : "hidden";
+                                    TryGetDouble(payload, "xr", out double bxr);
+                                    TryGetDouble(payload, "yr", out double byr);
+                                    TryGetDouble(payload, "wr", out double bwr);
+                                    TryGetDouble(payload, "hr", out double bhr);
+                                    WindowManager.InteractiveQuestInput?.SetBoundsRatios(mode, bxr, byr, bwr, bhr);
                                 }
                             }
                         }
@@ -1990,13 +1909,14 @@ namespace WebOverlay
         {
             Enabled = true;
 
-            // Для визуального слоя квестов click-through БОЛЬШЕ НЕ ПЕРЕКЛЮЧАЕТСЯ:
-            // мышь принимает отдельное окно InteractiveQuestForm, а color-key у
-            // этого слоя снят (см. ApplyVisualAlphaPath). Любое переключение
-            // здесь вернуло бы color-key и убило hit-test интерактивного окна.
+            // FIX v3 §11: визуальный слой квестов ВСЕГДА click-through.
+            // Его color-key всё равно исключает окно из desktop hit-test,
+            // поэтому включать ему кликабельность бессмысленно; мышь
+            // обрабатывает отдельное окно InteractiveQuestForm.
             if (IsQuestInteractivePage)
             {
-                QuestInputDiagnostics.State("ApplyClickability", $"source={source} SKIPPED (quest visual layer is visual-only)");
+                QuestInputDiagnostics.State("ApplyClickability", $"source={source} FORCED click-through (quest visual layer is visual-only)");
+                SetClickThrough(true);
                 return;
             }
 
@@ -2006,8 +1926,8 @@ namespace WebOverlay
 
         public void SetNativeClickability(bool clickable)
         {
-            // For the quest visual layer clickability is never switched: mouse is
-            // handled by InteractiveQuestForm and this layer must keep LWA_ALPHA.
+            // §11: для визуального слоя квестов set_clickable ИГНОРИРУЕТСЯ —
+            // он всегда остаётся click-through.
             _clickable = !IsQuestInteractivePage && clickable && IsSpecialClickThroughUrl(url);
             QuestInputDiagnostics.Log($"[OVERLAY-DIAG] POST set_clickable value={clickable} actualClickable={_clickable} url={url}", true);
             QuestInputDiagnostics.State("set_clickable", $"value={clickable} actual={_clickable}");
