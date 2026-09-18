@@ -11,9 +11,11 @@ using Microsoft.Web.WebView2.WinForms;
 namespace WebOverlay
 {
     /// <summary>
-    /// Keeps the transparent WebOverlay pages on one native colour-key path.
+    /// Keeps the transparent WebOverlay pages on one native colour-key path and
+    /// repairs the colour key if another component clears it.
     /// Clickability is controlled only by WS_EX_TRANSPARENT; the layered window
-    /// and colour key remain intact in both states.
+    /// and colour key remain intact in both states (see
+    /// OverlayForm.ApplyClickThroughStyle, which owns the style transition).
     /// </summary>
     internal static class OverlayTransparencyFix
     {
@@ -25,13 +27,26 @@ namespace WebOverlay
         private const int SWP_NOSIZE = 0x0001;
         private const int SWP_FRAMECHANGED = 0x0020;
 
+        // The colour-key pass only needs to repair drift, not to repaint every
+        // 50 ms. The previous per-tick SetLayeredWindowAttributes + Invalidate
+        // fought the clickability toggle and made the lime host flash.
+        private const int RepairIntervalMs = 500;
+
         private static readonly FieldInfo? WebViewField =
             typeof(OverlayForm).GetField("webView", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo? ClickableField =
             typeof(OverlayForm).GetField("_clickable", BindingFlags.Instance | BindingFlags.NonPublic);
 
         private static Timer? _timer;
-        private static readonly Dictionary<IntPtr, bool> LastClickable = new();
+        private static readonly Dictionary<IntPtr, OverlayWindowState> States = new();
+
+        private sealed class OverlayWindowState
+        {
+            public bool Clickable;
+            public bool ClickThrough = true;
+            public DateTime LastRepairUtc = DateTime.MinValue;
+            public DateTime LastForceRepaintUtc = DateTime.MinValue;
+        }
 
         [ModuleInitializer]
         internal static void Initialize()
@@ -45,7 +60,7 @@ namespace WebOverlay
 
             try
             {
-                _timer = new Timer { Interval = 50 };
+                _timer = new Timer { Interval = 100 };
                 _timer.Tick += (_, _) => ApplyToTransparentWindows();
                 _timer.Start();
                 ApplyToTransparentWindows();
@@ -115,8 +130,23 @@ namespace WebOverlay
         private static void Apply(OverlayForm window)
         {
             bool clickable = GetClickable(window);
-            bool changed = !LastClickable.TryGetValue(window.Handle, out bool previous) || previous != clickable;
-            LastClickable[window.Handle] = clickable;
+            if (!States.TryGetValue(window.Handle, out OverlayWindowState? state))
+            {
+                state = new OverlayWindowState();
+                States[window.Handle] = state;
+            }
+
+            bool clickThrough = window.NeedsClickThroughStyle;
+            bool changed = state.Clickable != clickable || state.ClickThrough != clickThrough;
+            state.Clickable = clickable;
+            state.ClickThrough = clickThrough;
+
+            DateTime now = DateTime.UtcNow;
+            bool needsRepair = changed || (now - state.LastRepairUtc).TotalMilliseconds >= RepairIntervalMs;
+            if (!needsRepair)
+                return;
+
+            state.LastRepairUtc = now;
 
             // Native host uses lime as its colour key; WebView2 itself stays
             // transparent so the host key can remove only the empty regions.
@@ -137,30 +167,18 @@ namespace WebOverlay
                     Program.Log($"OverlayTransparencyFix WebView2 background error: {ex.Message}");
             }
 
-            int exStyle = GetWindowLong(window.Handle, GWL_EXSTYLE);
-            int desiredStyle = exStyle | WS_EX_LAYERED;
+            // Repairs any style drift (OverlayForm owns the intended state).
+            OverlayForm.ApplyClickThroughStyle(window.Handle, clickThrough);
 
-            // The layered style is part of transparency and MUST NOT be removed
-            // when the overlay becomes clickable. Only WS_EX_TRANSPARENT changes.
-            if (clickable)
-                desiredStyle &= ~WS_EX_TRANSPARENT;
-            else
-                desiredStyle |= WS_EX_TRANSPARENT;
-
-            if (desiredStyle != exStyle)
+            // Repair the colour key only when it actually drifted. Writing
+            // SetLayeredWindowAttributes unconditionally repainted the layered
+            // surface and made the lime host background flash.
+            int limeKey = ColorTranslator.ToWin32(Color.Lime);
+            if (!HasColourKey(window.Handle, limeKey))
             {
-                SetWindowLong(window.Handle, GWL_EXSTYLE, desiredStyle);
-                SetWindowPos(window.Handle, IntPtr.Zero, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+                SetLayeredWindowAttributes(window.Handle, limeKey, 255, LWA_COLORKEY);
+                Program.Log($"OverlayTransparencyFix: {window.Url} colour key restored");
             }
-
-            // Re-apply the colour key in both states so a clickability toggle
-            // can never leave the lime host background visible.
-            SetLayeredWindowAttributes(
-                window.Handle,
-                ColorTranslator.ToWin32(Color.Lime),
-                255,
-                LWA_COLORKEY);
 
             // Never disable the native form for click-through. Form.Enabled=false
             // makes WebView focus/cursor state unstable and is unrelated to
@@ -171,11 +189,49 @@ namespace WebOverlay
 
             if (changed)
             {
-                Program.Log($"OverlayTransparencyFix: {window.Url} clickable={clickable} style=layered-colorkey, clickThrough={!clickable}");
+                Program.Log($"OverlayTransparencyFix: {window.Url} clickable={clickable} hotspot={(window.NeedsClickThroughStyle ? "off" : "on")} clickThrough={clickThrough}");
             }
 
-            window.Invalidate();
+            // A forced repaint every 100 ms kept the page compositing alive but
+            // also caused the visible flashing. Repaint only on a real state
+            // change: a timer-driven Invalidate hits the whole layered surface
+            // and is perceived as the overlay blinking.
+            if (changed)
+            {
+                state.LastForceRepaintUtc = now;
+                window.Invalidate();
+            }
         }
+
+        /// <summary>
+        /// Reads back the layered-window colour key. Only a window whose key is
+        /// missing needs a repair write; rewriting an already-correct key forces a
+        /// visible repaint of the layered surface.
+        /// </summary>
+        private static bool HasColourKey(IntPtr handle, int expectedKey)
+        {
+            try
+            {
+                if (!GetLayeredWindowAttributes(handle, out uint key, out byte alpha, out uint flags))
+                    return false;
+
+                // bAlpha is only meaningful together with LWA_ALPHA; WebView2
+                // resets it to 0 while LWA_COLORKEY stays intact, so it must not
+                // be part of the drift check or the repair would never settle.
+                return (flags & LWA_COLORKEY) != 0 && key == (uint)expectedKey;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetLayeredWindowAttributes(
+            IntPtr hwnd,
+            out uint crKey,
+            out byte bAlpha,
+            out uint dwFlags);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);

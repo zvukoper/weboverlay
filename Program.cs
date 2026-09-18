@@ -1,4 +1,4 @@
-﻿#nullable disable
+#nullable disable
 
 using System;
 using System.Collections.Generic;
@@ -137,6 +137,7 @@ namespace WebOverlay
         private static readonly List<OverlayForm> _windows = new();
         private static int _activeIndex = -1;
         private static bool _isLockMode = true;
+        private static bool _layersHidden;
 
         public static OverlayForm ActiveWindow =>
             _activeIndex >= 0 && _activeIndex < _windows.Count ? _windows[_activeIndex] : null;
@@ -158,6 +159,8 @@ namespace WebOverlay
                 form.UpdateSelectionBorder(false, false);
 
             form.Show();
+            if (_layersHidden)
+                form.SetLayerHidden(true);
 
             Program.Log($"WindowManager: создано окно {url}, active={setActive}, всего окон {_windows.Count}");
             form.UpdateManipulationInfo();
@@ -278,6 +281,29 @@ namespace WebOverlay
                 w.SetContentVisible(allHidden);
         }
 
+        /// <summary>
+        /// Полное скрытие/показ всех окон слоёв. Вызывается политикой оверлеев
+        /// приложения, когда фокус уходит на стороннее окно: на экране не должно
+        /// оставаться ни одного нашего окна поверх пользовательских.
+        /// Повторный вызов с тем же значением не трогает окна — иначе TopMost
+        /// Show() каждый раз перестраивал бы z-порядок и мигал оверлей.
+        /// </summary>
+        public static void SetAllLayersHidden(bool hidden)
+        {
+            if (_layersHidden == hidden)
+                return;
+
+            _layersHidden = hidden;
+            Program.Log($"WindowManager: SetAllLayersHidden({hidden}) окон={_windows.Count}");
+            foreach (var w in _windows)
+            {
+                try { w.SetLayerHidden(hidden); }
+                catch (Exception ex) { Program.Log($"SetAllLayersHidden error: {ex.Message}"); }
+            }
+        }
+
+        public static bool LayersHidden => _layersHidden;
+
         public static void ToggleHideActive()
         {
             ActiveWindow?.ToggleContentVisibility();
@@ -313,6 +339,19 @@ namespace WebOverlay
         private static string _logPath;
         private static OverlayForm _firstWindow;
 
+        /// <summary>
+        /// Overlay windows are visual layers only. When enabled, no overlay window
+        /// may become the active (foreground) window; ETS2 keeps the focus.
+        /// </summary>
+        internal static bool SuppressOverlayActivation = true;
+
+        /// <summary>
+        /// True once the global "toggle clickable" hotkey is owned by this process.
+        /// Fixes must not retry a binding that is already held: a failed
+        /// RegisterHotKey would otherwise be re-attempted forever.
+        /// </summary>
+        internal static bool ClickableHotkeyRegistered;
+
         internal const int MOD_ALT = 0x0001;
         internal const int MOD_CONTROL = 0x0002;
         internal const int MOD_SHIFT = 0x0004;
@@ -341,10 +380,15 @@ namespace WebOverlay
                 string url = null;
                 bool append = false;
                 bool close = false;
+                string bareCommand = null;
                 for (int i = 0; i < args.Length; i++)
                 {
                     string arg = args[i];
-                    if (arg.Equals("-append", StringComparison.OrdinalIgnoreCase) || arg.Equals("append", StringComparison.OrdinalIgnoreCase))
+                    if (arg.Equals("hide_all", StringComparison.OrdinalIgnoreCase) || arg.Equals("show_all", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bareCommand = arg.ToLowerInvariant();
+                    }
+                    else if (arg.Equals("-append", StringComparison.OrdinalIgnoreCase) || arg.Equals("append", StringComparison.OrdinalIgnoreCase))
                     {
                         append = true;
                         if (i + 1 < args.Length)
@@ -364,12 +408,19 @@ namespace WebOverlay
 
                 if (!createdNew)
                 {
-                    if (!string.IsNullOrEmpty(url))
+                    if (!string.IsNullOrEmpty(bareCommand))
+                        SendCommandToExistingInstance(bareCommand);
+                    else if (!string.IsNullOrEmpty(url))
                         SendCommandToExistingInstance((close ? "close|" : "append|") + url);
                     return;
                 }
 
                 if (close)
+                    return;
+
+                // Одиночная команда без цели (hide_all/show_all) сама по себе
+                // окна не создаёт: если хост не запущен, делать нечего.
+                if (!string.IsNullOrEmpty(bareCommand))
                     return;
 
                 _appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WebOverlay");
@@ -443,6 +494,8 @@ namespace WebOverlay
                     return false;
 
                 bool ok = RegisterHotKey(handle, id, modifiers, vk);
+                if (id == HOTKEY_TOGGLE_CLICKABLE)
+                    ClickableHotkeyRegistered = ok;
                 Log($"Hotkey id={id} binding={binding} registered={ok}");
                 return ok;
             }
@@ -494,24 +547,34 @@ namespace WebOverlay
                             continue;
 
                         string[] parts = line.Split('|');
-                        if (parts.Length != 2 || _firstWindow == null || _firstWindow.IsDisposed)
+                        if (parts.Length < 1 || _firstWindow == null || _firstWindow.IsDisposed)
                             continue;
 
                         string command = parts[0];
-                        string pipeUrl = parts[1];
+                        string pipeUrl = parts.Length > 1 ? parts[1] : string.Empty;
                         _firstWindow.Invoke(new Action(() =>
                         {
                             try
                             {
-                                if (command == "append")
+                                if (command == "append" && !string.IsNullOrWhiteSpace(pipeUrl))
                                 {
                                     WindowManager.CreateWindow(pipeUrl, _config, _appDataDir, false);
                                     Log($"Создано новое окно с URL: {pipeUrl} (не активное)");
                                 }
-                                else if (command == "close")
+                                else if (command == "close" && !string.IsNullOrWhiteSpace(pipeUrl))
                                 {
                                     bool closed = WindowManager.CloseWindowByUrl(pipeUrl);
                                     Log($"Pipe close url={pipeUrl} closed={closed}");
+                                }
+                                else if (command == "hide_all")
+                                {
+                                    // Фокус ушёл на стороннее окно: ни одно наше окно
+                                    // не должно висеть поверх пользовательских.
+                                    WindowManager.SetAllLayersHidden(true);
+                                }
+                                else if (command == "show_all")
+                                {
+                                    WindowManager.SetAllLayersHidden(false);
                                 }
                             }
                             catch (Exception ex)
@@ -704,9 +767,15 @@ namespace WebOverlay
         private readonly AppConfig _config;
         private readonly string _appDataDir;
         private bool _clickable;
+        // Если задано, мышь принимается только внутри этой области клиента.
+        private Rectangle _hotspot = Rectangle.Empty;
+        // Попадает ли курсор в горячую область прямо сейчас (см. NeedsClickThroughStyle).
+        private bool _hotspotCursorInside;
+        private readonly System.Windows.Forms.Timer _hotspotTimer;
         private bool _showYellow;
         private bool _showBlue;
         private bool _contentVisible = true;
+        private bool _layerHidden;
         private bool _manipulationMode;
         private bool _visibilityBeforeManipulation = true;
         private WindowInfoForm _infoForm;
@@ -719,9 +788,28 @@ namespace WebOverlay
         public string Url => url;
         public bool IsContentVisible => _contentVisible;
 
+        /// <summary>
+        /// Overlays are pure visual layers: they must never take activation away
+        /// from ETS2. WS_EX_NOACTIVATE + ShowWithoutActivation keep the game's
+        /// foreground window intact even while the overlay owns the mouse.
+        /// </summary>
+        protected override bool ShowWithoutActivation => true;
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+                return cp;
+            }
+        }
+
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_TRANSPARENT = 0x00000020;
         private const int WS_EX_LAYERED = 0x00080000;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
         private const int SWP_NOMOVE = 0x0002;
         private const int SWP_NOSIZE = 0x0001;
         private const int SWP_FRAMECHANGED = 0x0020;
@@ -737,11 +825,30 @@ namespace WebOverlay
         [DllImport("user32.dll")]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll")]
+        private static extern bool ScreenToClient(IntPtr hWnd, ref Point lpPoint);
+        [DllImport("user32.dll")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, int uFlags);
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")]
+        private static extern IntPtr WindowFromPoint(Point point);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SendMessageTimeout(
+            IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+        private const uint WM_MOUSEMOVE = 0x0200;
+        private const uint SMTO_ABORTIFHUNG = 0x0002;
 
         public OverlayForm(string url, AppConfig config, string appDataDir)
         {
@@ -762,6 +869,8 @@ namespace WebOverlay
             {
                 TopMost = true;
                 SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                // Стиль мыши применяется только после создания дескриптора.
+                ApplyClickability();
                 UpdateManipulationInfo();
             };
 
@@ -785,6 +894,67 @@ namespace WebOverlay
                 FlushDeferredStateSave();
             };
             _manipulationTimer.Start();
+
+            // Режим «горячей области» (свёрнутая закладка «Квесты»): мышь должна
+            // доходить только до прямоугольника закладки. WS_EX_TRANSPARENT тут не
+            // подходит — он отключает попадание мыши во ВСЁ окно, а HTTRANSPARENT из
+            // WM_NCHITTEST до нас не доходит: над окном лежит дочерний HWND WebView2
+            // и решает хит-тест сам. Поэтому стиль переключается по положению
+            // курсора: курсор в области — окно принимает мышь, вне области —
+            // снова становится прозрачным для мыши.
+            // Таймер идёт ТОЛЬКО пока задана горячая область: без неё он каждые
+            // 30 мс переписывал стиль, а каждое такое переключение перестраивает
+            // слоистое окно и выглядит как мигание всего оверлея.
+            _hotspotTimer = new System.Windows.Forms.Timer { Interval = 30 };
+            _hotspotTimer.Tick += (_, _) => UpdateHotspotCursorState();
+        }
+
+        private bool IsHotspotCursorInside()
+        {
+            if (_hotspot.IsEmpty)
+                return false;
+            try
+            {
+                var pt = Cursor.Position;
+                ScreenToClient(Handle, ref pt);
+                return _hotspot.Contains(pt);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Держит стиль окна в соответствии с текущим положением курсора.
+        /// Работает только в режиме горячей области.
+        /// </summary>
+        private void UpdateHotspotCursorState()
+        {
+            if (_hotspot.IsEmpty || !IsHandleCreated)
+                return;
+            bool inside = IsHotspotCursorInside();
+            if (inside == _hotspotCursorInside)
+                return;
+
+            _hotspotCursorInside = inside;
+            ApplyClickThroughStyle(Handle, !inside);
+        }
+
+        /// <summary>
+        /// Таймер горячей области нужен только когда область реально задана.
+        /// </summary>
+        private void UpdateHotspotTimerState()
+        {
+            if (_hotspotTimer == null)
+                return;
+
+            bool needed = !_hotspot.IsEmpty;
+            if (needed == _hotspotTimer.Enabled)
+                return;
+
+            if (needed) _hotspotTimer.Start();
+            else _hotspotTimer.Stop();
         }
 
         private static bool IsSpecialClickThroughUrl(string value)
@@ -871,18 +1041,47 @@ namespace WebOverlay
                         if (!string.IsNullOrWhiteSpace(message) && message.StartsWith("{"))
                         {
                             var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(message);
-                            if (payload != null && payload.TryGetValue("command", out var command) &&
-                                string.Equals(command.GetString(), "set_clickable", StringComparison.OrdinalIgnoreCase) &&
-                                payload.TryGetValue("value", out var value))
+                            if (payload != null && payload.TryGetValue("command", out var command))
                             {
-                                SetNativeClickability(value.GetBoolean());
+                                string name = command.GetString() ?? "";
+                                if (string.Equals(name, "set_clickable", StringComparison.OrdinalIgnoreCase) &&
+                                    payload.TryGetValue("value", out var value))
+                                {
+                                    SetNativeClickability(value.GetBoolean());
+                                }
+                                else if (string.Equals(name, "return_focus", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    // Интерактив свернулся — управление возвращается игре.
+                                    ReturnFocusToGameIfPossible();
+                                }
+                                else if (string.Equals(name, "set_clickable_hotspot", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    // Относительные координаты (доли клиентской области)
+                                    // предпочтительны: окно-хост не объявляет DPI-манифест,
+                                    // поэтому CSS-пиксели страницы могут не совпадать с
+                                    // клиентскими пикселями окна.
+                                    if (TryGetDouble(payload, "xr", out double xr) && TryGetDouble(payload, "wr", out double wr))
+                                    {
+                                        TryGetDouble(payload, "yr", out double yr);
+                                        TryGetDouble(payload, "hr", out double hr);
+                                        SetClickableHotspotRelative(xr, yr, wr, hr);
+                                    }
+                                    else
+                                    {
+                                        int hx = payload.TryGetValue("x", out var jx) ? jx.GetInt32() : 0;
+                                        int hy = payload.TryGetValue("y", out var jy) ? jy.GetInt32() : 0;
+                                        int hw = payload.TryGetValue("w", out var jw) ? jw.GetInt32() : 0;
+                                        int hh = payload.TryGetValue("h", out var jh) ? jh.GetInt32() : 0;
+                                        SetClickableHotspot(hx, hy, hw, hh);
+                                    }
+                                }
                             }
                         }
                     }
                     catch { }
                 };
 
-                webView.CoreWebView2.Navigate(url);                webView.CoreWebView2.Navigate(url);
+                webView.CoreWebView2.Navigate(url);
             }
             catch (Exception ex)
             {
@@ -969,9 +1168,40 @@ namespace WebOverlay
         public void SetContentVisible(bool visible)
         {
             _contentVisible = visible;
-            if (!_manipulationMode && webView != null)
+            if (!_manipulationMode && !_layerHidden && webView != null)
                 webView.Visible = visible;
         }
+
+        /// <summary>
+        /// Полное скрытие окна слоя. Отличается от SetContentVisible: прячется
+        /// само окно (и подложка), поэтому закладка/картинка исчезают с экрана
+        /// целиком. Используется политикой оверлеев, когда фокус уходит на
+        /// стороннее окно: наложение поверх пользовательских окон запрещено.
+        /// </summary>
+        public void SetLayerHidden(bool hidden)
+        {
+            _layerHidden = hidden;
+            if (hidden)
+            {
+                if (!_manipulationMode && webView != null)
+                    webView.Visible = false;
+                Hide();
+            }
+            else
+            {
+                if (!Visible)
+                {
+                    base.Show();
+                    TopMost = true;
+                    SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                }
+                if (!_manipulationMode && webView != null)
+                    webView.Visible = _contentVisible;
+                ApplyClickability();
+            }
+        }
+
+        public bool IsLayerHidden => _layerHidden;
 
         public void ToggleContentVisibility()
         {
@@ -1018,18 +1248,131 @@ namespace WebOverlay
         private void ApplyClickability()
         {
             Enabled = true;
-            SetClickThrough(!_clickable);
+            SetClickThrough(NeedsClickThroughStyle);
         }
 
         public void SetNativeClickability(bool clickable)
         {
-            if (url != null && url.Contains("web_quests.html", StringComparison.OrdinalIgnoreCase))
-                _clickable = clickable;
-            else
-                _clickable = false;
+            // Only the explicitly interactive pages may take mouse input; every
+            // other overlay always stays click-through.
+            _clickable = clickable && IsSpecialClickThroughUrl(url);
+            if (_clickable)
+            {
+                _hotspot = Rectangle.Empty;
+                _hotspotCursorInside = false;
+                UpdateHotspotTimerState();
+            }
 
-            SetClickThrough(!_clickable);
+            SetClickThrough(NeedsClickThroughStyle);
             UpdateManipulationInfo();
+        }
+
+        public void SetClickableHotspot(int x, int y, int width, int height)
+        {
+            if (width <= 0 || height <= 0)
+            {
+                _hotspot = Rectangle.Empty;
+                _hotspotCursorInside = false;
+                UpdateHotspotTimerState();
+                if (IsHandleCreated)
+                    ApplyClickThroughStyle(Handle, NeedsClickThroughStyle);
+                return;
+            }
+
+            _hotspot = new Rectangle(x, y, width, height);
+            // WS_EX_TRANSPARENT отключил бы попадание мыши в окно целиком,
+            // поэтому прозрачность обеспечивает переключение стиля по курсору
+            // (см. UpdateHotspotCursorState): мышь принимается только над закладкой.
+            _hotspotCursorInside = IsHotspotCursorInside();
+            UpdateHotspotTimerState();
+            if (IsHandleCreated)
+                ApplyClickThroughStyle(Handle, !_hotspotCursorInside);
+            UpdateManipulationInfo();
+        }
+
+        /// <summary>
+        /// Вариант горячей области в долях клиентской области. Окно-хост не
+        /// объявляет DPI-манифест, поэтому CSS-пиксели страницы могут не
+        /// совпадать с клиентскими: пересчёт через ClientSize делает попадание
+        /// по закладке независимым от масштаба экрана.
+        /// </summary>
+        public void SetClickableHotspotRelative(double xRatio, double yRatio, double widthRatio, double heightRatio)
+        {
+            if (widthRatio <= 0 || heightRatio <= 0)
+            {
+                SetClickableHotspot(0, 0, 0, 0);
+                return;
+            }
+
+            int clientWidth = Math.Max(1, ClientSize.Width);
+            int clientHeight = Math.Max(1, ClientSize.Height);
+            int x = (int)Math.Round(xRatio * clientWidth);
+            int y = (int)Math.Round(yRatio * clientHeight);
+            int w = Math.Max(1, (int)Math.Round(widthRatio * clientWidth));
+            int h = Math.Max(1, (int)Math.Round(heightRatio * clientHeight));
+            SetClickableHotspot(x, y, w, h);
+        }
+
+        private static bool TryGetDouble(Dictionary<string, JsonElement> payload, string key, out double value)
+        {
+            value = 0;
+            if (!payload.TryGetValue(key, out JsonElement element))
+                return false;
+            try
+            {
+                if (element.ValueKind != JsonValueKind.Number)
+                    return false;
+                value = element.GetDouble();
+                return !double.IsNaN(value) && !double.IsInfinity(value);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Нужен ли окну стиль полной прозрачности для мыши. В режиме горячей
+        /// области мышь принимается только пока курсор над закладкой.
+        /// </summary>
+        internal bool NeedsClickThroughStyle =>
+            _clickable ? false : (_hotspot.IsEmpty || !_hotspotCursorInside);
+
+        /// <summary>
+        /// Focus stays with ETS2. When anything forces the overlay to the
+        /// foreground, this hands focus straight back to the game window.
+        /// </summary>
+        internal void ReturnFocusToGameIfPossible()
+        {
+            try
+            {
+                IntPtr gameHandle = IntPtr.Zero;
+                foreach (var process in System.Diagnostics.Process.GetProcessesByName("eurotrucks2"))
+                {
+                    try { if (process.MainWindowHandle != IntPtr.Zero) { gameHandle = process.MainWindowHandle; break; } }
+                    catch { }
+                }
+
+                if (gameHandle == IntPtr.Zero || GetForegroundWindow() == gameHandle)
+                    return;
+
+                uint currentThread = GetCurrentThreadId();
+                IntPtr foreground = GetForegroundWindow();
+                uint foregroundThread = foreground != IntPtr.Zero ? GetWindowThreadProcessId(foreground, IntPtr.Zero) : 0;
+                bool attached = false;
+                try
+                {
+                    if (foregroundThread != 0 && foregroundThread != currentThread)
+                        attached = AttachThreadInput(foregroundThread, currentThread, true);
+                    SetForegroundWindow(gameHandle);
+                }
+                finally
+                {
+                    if (attached)
+                        AttachThreadInput(foregroundThread, currentThread, false);
+                }
+            }
+            catch { }
         }
 
         private void SetClickThrough(bool enable)
@@ -1037,15 +1380,63 @@ namespace WebOverlay
             if (!IsHandleCreated)
                 return;
 
-            int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);
-            if (enable)
-                exStyle |= WS_EX_TRANSPARENT | WS_EX_LAYERED;
-            else
-                exStyle &= ~(WS_EX_TRANSPARENT | WS_EX_LAYERED);
+            if (ApplyClickThroughStyle(Handle, enable))
+                Log($"SetClickThrough: {enable}");
+        }
 
-            SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
-            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
-            Log($"SetClickThrough: {enable}");
+        /// <summary>
+        /// Single source of truth for the transparent-overlay native style.
+        /// WS_EX_LAYERED carries the colour key, so it must stay enabled in both
+        /// states; only WS_EX_TRANSPARENT switches with clickability. Removing the
+        /// layered style made the lime host background flash through the page.
+        /// Returns true only when the style actually changed: a redundant
+        /// SetWindowLong + SetWindowPos(SWP_FRAMECHANGED) rebuilds the layered
+        /// surface and is perceived as the overlay blinking.
+        /// </summary>
+        internal static bool ApplyClickThroughStyle(IntPtr handle, bool clickThrough)
+        {
+            if (handle == IntPtr.Zero)
+                return false;
+
+            int exStyle = GetWindowLong(handle, GWL_EXSTYLE);
+            int desired = exStyle | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+            if (clickThrough)
+                desired |= WS_EX_TRANSPARENT;
+            else
+                desired &= ~WS_EX_TRANSPARENT;
+
+            if (desired == exStyle)
+                return false;
+
+            SetWindowLong(handle, GWL_EXSTYLE, desired);
+            SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+
+            // WS_EX_TRANSPARENT alone does not re-evaluate the CACHED window under
+            // the cursor, so after a click-through toggle the window would keep
+            // receiving hover/click until the mouse moves off and back. Re-post the
+            // hit test so the change takes effect immediately.
+            ForceCursorHitTest();
+            return true;
+        }
+
+        /// <summary>
+        /// Перевычисляет окно под курсором, чтобы смена стиля прозрачности для
+        /// мыши вступила в силу без движения мыши.
+        /// </summary>
+        private static void ForceCursorHitTest()
+        {
+            var pt = Cursor.Position;
+            IntPtr window = WindowFromPoint(pt);
+            if (window == IntPtr.Zero)
+                return;
+            SendMessageTimeout(
+                window,
+                WM_MOUSEMOVE,
+                IntPtr.Zero,
+                (IntPtr)((pt.Y << 16) | (pt.X & 0xFFFF)),
+                SMTO_ABORTIFHUNG,
+                50,
+                out _);
         }
 
         public void UpdateManipulationInfo()
@@ -1340,10 +1731,27 @@ namespace WebOverlay
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_NCHITTEST && !_clickable)
+            if (m.Msg == WM_NCHITTEST)
             {
-                m.Result = new IntPtr(HTTRANSPARENT);
-                return;
+                // Свёрнутый интерактив НЕ кликабелен целиком: мышь принимает
+                // только «горячая область» — закладка у левой границы экрана.
+                // Поэтому сначала проверяем область, и лишь потом — общий флаг.
+                if (!_hotspot.IsEmpty)
+                {
+                    // WM_NCHITTEST reports screen coordinates for a top-level window.
+                    var pt = new Point(unchecked((short)(long)m.LParam), unchecked((short)((long)m.LParam >> 16)));
+                    ScreenToClient(Handle, ref pt);
+                    if (!_hotspot.Contains(pt))
+                    {
+                        m.Result = new IntPtr(HTTRANSPARENT);
+                        return;
+                    }
+                }
+                else if (!_clickable)
+                {
+                    m.Result = new IntPtr(HTTRANSPARENT);
+                    return;
+                }
             }
 
             if (m.Msg == 0x0312)
@@ -1368,12 +1776,23 @@ namespace WebOverlay
 
             if (_infoForm != null)
             {
+                try { _infoForm.Hide(); } catch { }
                 try { _infoForm.Close(); } catch { }
                 _infoForm = null;
             }
 
             WindowManager.RemoveWindow(this);
             base.OnFormClosing(e);
+        }
+
+        // A no-activate overlay still receives WM_ACTIVATE when another process
+        // forces focus onto it; ignore it so the game keeps the foreground.
+        protected override void OnActivated(EventArgs e)
+        {
+            if (Program.SuppressOverlayActivation)
+                return;
+
+            base.OnActivated(e);
         }
     }
 

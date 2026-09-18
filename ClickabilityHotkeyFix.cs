@@ -17,8 +17,10 @@ namespace WebOverlay
     {
         private const int WM_HOTKEY = 0x0312;
         private const int HOTKEY_ID = 0x5A51;
+        private const int ERROR_HOTKEY_ALREADY_REGISTERED = 1409;
 
         private static Timer? _timer;
+        private static bool _failureLogged;
         private static IntPtr _registeredHandle;
         private static string _registeredBinding = "";
         private static readonly HotkeyMessageFilter MessageFilter = new();
@@ -38,11 +40,17 @@ namespace WebOverlay
                 Application.AddMessageFilter(MessageFilter);
                 Application.ApplicationExit += (_, _) => Unregister();
 
-                _timer = new Timer { Interval = 250 };
-                _timer.Tick += (_, _) => EnsureRegistered();
-                _timer.Start();
-
                 EnsureRegistered();
+
+                // Только пока хоткей не принадлежит этому процессу: повторная
+                // регистрация уже занятого сочетания падала бы вечно и засоряла
+                // лог (было ~4 попытки в секунду).
+                if (!Program.ClickableHotkeyRegistered)
+                {
+                    _timer = new Timer { Interval = 250 };
+                    _timer.Tick += (_, _) => EnsureRegistered();
+                    _timer.Start();
+                }
             }
             catch (Exception ex)
             {
@@ -54,6 +62,12 @@ namespace WebOverlay
         {
             try
             {
+                if (Program.ClickableHotkeyRegistered)
+                {
+                    Stop();
+                    return;
+                }
+
                 var window = WindowManager.Windows.FirstOrDefault(w =>
                     w != null && !w.IsDisposed && w.IsHandleCreated);
                 if (window == null)
@@ -76,17 +90,45 @@ namespace WebOverlay
                     _registeredHandle = window.Handle;
                     _registeredBinding = binding;
                     Program.Log($"ClickabilityHotkeyFix: registered id={HOTKEY_ID} binding={binding}");
+                    Stop();
                 }
                 else
                 {
                     int error = Marshal.GetLastWin32Error();
-                    Program.Log($"ClickabilityHotkeyFix: RegisterHotKey failed binding={binding} error={error}");
+                    if (error == ERROR_HOTKEY_ALREADY_REGISTERED)
+                    {
+                        // Сочетание уже принадлежит Program (тот же Ctrl+Shift+Alt+U).
+                        // Повторять бессмысленно: обработчик Program его уже получает.
+                        Program.ClickableHotkeyRegistered = true;
+                        Program.Log($"ClickabilityHotkeyFix: binding={binding} уже зарегистрирован в Program, повторные попытки прекращены");
+                        Stop();
+                    }
+                    else if (_failureLogged)
+                    {
+                        Stop();
+                    }
+                    else
+                    {
+                        _failureLogged = true;
+                        Program.Log($"ClickabilityHotkeyFix: RegisterHotKey failed binding={binding} error={error}");
+                    }
                 }
             }
             catch (Exception ex)
             {
                 Program.Log($"ClickabilityHotkeyFix registration error: {ex.Message}");
             }
+        }
+
+        private static void Stop()
+        {
+            var timer = _timer;
+            _timer = null;
+            if (timer == null)
+                return;
+
+            timer.Stop();
+            timer.Dispose();
         }
 
         private static string LoadBinding()
