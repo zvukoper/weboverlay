@@ -784,6 +784,103 @@ namespace WebOverlay
         private DateTime _lastDeferredSaveUtc = DateTime.MinValue;
         private bool _stateApplying;
 
+        // ================================================================
+        // КУРСОР ИНТЕРАКТИВНОГО ОВЕРЛЕЯ (v1.0.40.60)
+        //
+        // ПРОБЛЕМА: ETS2 со своим HUD скрывает системный курсор и рисует свой.
+        // Он остаётся видимым и двигается ПОД нашим окном: курсор "принадлежит"
+        // игре, а не оверлею. Показать курсор страницы не помогает — его рисует
+        // Chromium внутри своего HWND, а системный (игровой) курсор всё равно
+        // остаётся сверху как отдельный объект рабочего стола.
+        //
+        // РЕШЕНИЕ: пока оверлей принимает мышь, ХОСТ САМ ВЛАДЕЕТ КУРСОРОМ:
+        //   * ShowCursor(TRUE)  — включает системный курсор (счётчик показа);
+        //   * SetCursor(idc)    — отдаёт стрелку, перебивая игровой WM_SETCURSOR;
+        //   * WM_SETCURSOR/WM_MOUSEMOVE приходят в окно под курсором → на своём
+        //     окне игровой курсор не перерисовывается.
+        // ⛔ Счётчик ShowCursor СБАЛАНСИРОВАН: сколько раз включили — столько
+        //    раз выключили (иначе курсор исчезнет для ВСЕЙ системы).
+        // ⛔ ВАЖНО, ЧТО ЭТО НЕ ЗАХВАТ ФОКУСА: foreground по-прежнему у игры,
+        //    иначе ломается телеметрия (регресс v1.0.40.54).
+        // ================================================================
+        private bool _cursorOwned;
+        private int _showCursorCalls;
+        private readonly System.Windows.Forms.Timer _cursorKeepAliveTimer;
+
+        [DllImport("user32.dll")]
+        private static extern int ShowCursor(bool bShow);
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetCursor(IntPtr hCursor);
+        [DllImport("user32.dll")]
+        private static extern IntPtr LoadCursor(IntPtr hInstance, int lpCursorName);
+
+        /// <summary>IDC_ARROW — стандартная стрелка («MAKEINTRESOURCE» 32512).</summary>
+        private static readonly IntPtr IDC_ARROW = LoadCursor(IntPtr.Zero, 32512);
+
+        private const int WM_SETCURSOR = 0x0020;
+        private const int HTCLIENT = 0x0001;
+
+        /// <summary>
+        /// Включить системный курсор. Игра могла увести счётчик показа далеко в
+        /// минус (каждый её кадр со «скрытым» курсором вызывает ShowCursor(FALSE)),
+        /// поэтому включаем ДО НЕОТРИЦАТЕЛЬНОГО значения. Сколько раз реально
+        /// включили — запоминаем, чтобы потом сбалансированно выключить.
+        /// </summary>
+        private void AcquireCursor()
+        {
+            // Верхняя граница — страховка от бесконечного цикла.
+            for (int guard = 0; guard < 128; guard++)
+            {
+                int before = ShowCursor(true);
+                _showCursorCalls++;
+                if (before >= 0)
+                    break;
+            }
+            SetCursor(IDC_ARROW);
+        }
+
+        /// <summary>Сбалансированно вернуть курсор системе.</summary>
+        private void ReleaseCursor()
+        {
+            for (int i = 0; i < _showCursorCalls; i++)
+                ShowCursor(false);
+            _showCursorCalls = 0;
+        }
+
+        /// <summary>
+        /// Отдать курсор этому слою (показать системный и запретить игре
+        /// перерисовывать свой). Вызывается страницей командой set_cursor.
+        /// </summary>
+        public void SetCursorOwnership(bool owned)
+        {
+            owned = owned && IsSpecialClickThroughUrl(url);
+            if (owned == _cursorOwned)
+                return;
+
+            _cursorOwned = owned;
+            try
+            {
+                if (owned)
+                {
+                    AcquireCursor();
+                    // Игра продолжает скрывать СВОЙ курсор каждый кадр и этим
+                    // опускает общий счётчик показа ниже нуля — без поддержки
+                    // стрелка пропала бы через несколько кадров. Держим её
+                    // «поверх» игры, пока слой владеет курсором (дешёвая
+                    // операция; таймер работает ТОЛЬКО в этом режиме).
+                    _cursorKeepAliveTimer.Start();
+                }
+                else
+                {
+                    _cursorKeepAliveTimer.Stop();
+                    ReleaseCursor();
+                }
+            }
+            catch { }
+
+            UpdateManipulationInfo();
+        }
+
         public bool IsLocked => _isLocked;
         public string Url => url;
         public bool IsContentVisible => _contentVisible;
@@ -907,6 +1004,42 @@ namespace WebOverlay
             // слоистое окно и выглядит как мигание всего оверлея.
             _hotspotTimer = new System.Windows.Forms.Timer { Interval = 30 };
             _hotspotTimer.Tick += (_, _) => UpdateHotspotCursorState();
+
+            // v1.0.40.60: «пульс» владения курсором. Пока интерактивный слой
+            // развёрнут, игра каждый кадр скрывает СВОЙ курсор и этим опускает
+            // общий счётчик показа; раз в 30 мс возвращаем его обратно.
+            // ⛔ Счётчик выравнивается, а не растёт: считаем только те вызовы,
+            //    что реально ушли в положительную сторону (см. AcquireCursor).
+            _cursorKeepAliveTimer = new System.Windows.Forms.Timer { Interval = 30 };
+            _cursorKeepAliveTimer.Tick += (_, _) =>
+            {
+                if (!_cursorOwned)
+                    return;
+                try
+                {
+                    // ⛔ ОШИБКА БЫЛА ЗДЕСЬ (off-by-one). ShowCursor возвращает
+                    // счётчик ПОСЛЕ вызова, и курсор ВИДЕН при счётчике >= 0.
+                    // Значит:
+                    //   n == 0  ⇒ ДО вызова было −1 (курсор был скрыт) — этот плюс
+                    //             НУЖНО ОСТАВИТЬ, иначе курсор снова исчезнет;
+                    //   n >= 1  ⇒ ДО вызова было >= 0 (курсор уже был виден) —
+                    //             вот только этот «лишний» плюс надо вернуть.
+                    // Прежнее условие `level >= 0` ошибочно откатывало и нужный
+                    // плюс: счётчик болтался между −1 и 0, а курсор оставался
+                    // скрытым. Пользователь и не видел стрелку НИКОГДА.
+                    int level = ShowCursor(true);
+                    if (level >= 1)
+                    {
+                        ShowCursor(false);      // откатываем только лишний плюс
+                    }
+                    else
+                    {
+                        _showCursorCalls++;     // этот плюс реально нужен
+                    }
+                    SetCursor(IDC_ARROW);
+                }
+                catch { }
+            };
         }
 
         private bool IsHotspotCursorInside()
@@ -1053,6 +1186,14 @@ namespace WebOverlay
                                 {
                                     // Интерактив свернулся — управление возвращается игре.
                                     ReturnFocusToGameIfPossible();
+                                }
+                                else if (string.Equals(name, "set_cursor", StringComparison.OrdinalIgnoreCase) &&
+                                         payload.TryGetValue("value", out var cursorValue))
+                                {
+                                    // v1.0.40.60: слой забирает СИСТЕМНЫЙ КУРСОР
+                                    // (ShowCursor + IDC_ARROW). Иначе остаётся
+                                    // видимым и двигается под окном курсор игры.
+                                    SetCursorOwnership(cursorValue.GetBoolean());
                                 }
                                 else if (string.Equals(name, "set_clickable_hotspot", StringComparison.OrdinalIgnoreCase))
                                 {
@@ -1731,6 +1872,20 @@ namespace WebOverlay
 
         protected override void WndProc(ref Message m)
         {
+            // v1.0.40.60: пока слой владеет курсором, на своей клиентской области
+            // отдаём СТАНДАРТНУЮ СТРЕЛКУ. Сообщение приходит в окно ПОД КУРСОРОМ,
+            // поэтому игра в этот момент свой (скрытый) курсор не перерисовывает,
+            // и он не остаётся висеть поверх нашего окна.
+            if (m.Msg == WM_SETCURSOR && _cursorOwned)
+            {
+                if (unchecked((int)(long)m.LParam & 0xFFFF) == HTCLIENT)
+                {
+                    SetCursor(IDC_ARROW);
+                    m.Result = new IntPtr(1);
+                    return;
+                }
+            }
+
             if (m.Msg == WM_NCHITTEST)
             {
                 // Свёрнутый интерактив НЕ кликабелен целиком: мышь принимает
@@ -1765,6 +1920,10 @@ namespace WebOverlay
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // Курсор ОБЯЗАН вернуться системе: иначе он исчезнет во ВСЕХ
+            // приложениях (счётчик ShowCursor не будет сбалансирован).
+            try { SetCursorOwnership(false); } catch { }
+
             SaveState();
             _config.Clickable = _clickable;
             Program.SaveConfig(Path.Combine(_appDataDir, "config.json"), _config);
