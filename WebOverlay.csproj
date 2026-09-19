@@ -6,7 +6,7 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <!-- Diagnostic build stamp: must be visible in Program.LogStartOnce(). -->
-    <Version>1.0.40.67</Version>
+    <Version>1.0.40.68</Version>
     <AssemblyVersion>1.0.40.67</AssemblyVersion>
     <FileVersion>1.0.40.67</FileVersion>
     <AssemblyInformationalVersion>1.0.40.67-RAW-INPUT-TEST</AssemblyInformationalVersion>
