@@ -118,9 +118,10 @@ namespace WebOverlay
         private ushort _lastButtonData;
         private IntPtr _lastDevice;
 
-        // Софтовый курсор живёт как виртуальная координата и СОХРАНЯЕТСЯ между
-        // паузами. GetCursorPos используется только при первичной синхронизации.
-        // После неё движение идёт исключительно по Raw Input dx/dy.
+        // Софтовый курсор живёт как виртуальная координата. При каждом входе
+        // в паузу текущая позиция игрового/системного курсора сохраняется,
+        // временно калибруется через (0,0), затем восстанавливается. После этого
+        // движение идёт исключительно по Raw Input dx/dy.
         private int _cursorX;
         private int _cursorY;
         private bool _cursorValid;
@@ -128,6 +129,9 @@ namespace WebOverlay
         private int _buttons;
         private bool _cursorCalibrationActive;
         private DateTime _ignoreRawUntilUtc = DateTime.MinValue;
+        private Point _lastGameCursorScreen;
+        private Point _lastGameCursorClient;
+        private bool _hasLastGameCursor;
 
         internal long RawPackets => _rawPackets;
         internal long RawPacketsAllStates => _rawPacketsAllStates;
@@ -137,6 +141,10 @@ namespace WebOverlay
         internal int RawLastDy => _lastDy;
         internal int SoftCursorX => _cursorValid ? _cursorX : -1;
         internal int SoftCursorY => _cursorValid ? _cursorY : -1;
+        internal int GameCursorScreenX => _hasLastGameCursor ? _lastGameCursorScreen.X : -1;
+        internal int GameCursorScreenY => _hasLastGameCursor ? _lastGameCursorScreen.Y : -1;
+        internal int GameCursorClientX => _hasLastGameCursor ? _lastGameCursorClient.X : -1;
+        internal int GameCursorClientY => _hasLastGameCursor ? _lastGameCursorClient.Y : -1;
 
         internal string Url { get; }
         internal string Mode => _mode;
@@ -566,6 +574,10 @@ namespace WebOverlay
                     buttonFlags = _lastButtonFlags,
                     buttonData = _lastButtonData,
                     device = $"0x{_lastDevice.ToInt64():X}",
+                    gameCursorScreenX = GameCursorScreenX,
+                    gameCursorScreenY = GameCursorScreenY,
+                    gameCursorClientX = GameCursorClientX,
+                    gameCursorClientY = GameCursorClientY,
                     cursorX = _cursorValid ? _cursorX : -1,
                     cursorY = _cursorValid ? _cursorY : -1,
                     softCursorActive = SoftCursorActive,
@@ -731,6 +743,10 @@ namespace WebOverlay
                 originalClient.X = ClampCursorX(originalClient.X);
                 originalClient.Y = ClampCursorY(originalClient.Y);
 
+                _lastGameCursorScreen = originalScreen;
+                _lastGameCursorClient = originalClient;
+                _hasLastGameCursor = true;
+
                 Point screenOrigin = _visual.PointToScreen(Point.Empty);
 
                 QuestInputDiagnostics.Log(
@@ -756,12 +772,32 @@ namespace WebOverlay
                 bool restored = SetCursorPos(originalScreen.X, originalScreen.Y);
                 if (!restored)
                 {
+                    int error = Marshal.GetLastWin32Error();
                     QuestInputDiagnostics.Log(
-                        $"[SOFT-CURSOR][CALIBRATE] restore failed error={Marshal.GetLastWin32Error()}");
+                        $"[SOFT-CURSOR][CALIBRATE] restore failed error={error}; retrying");
 
-                    // Не оставляем системный курсор в (0,0), если восстановление
-                    // исходной точки не удалось с первого вызова.
-                    SetCursorPos(originalScreen.X, originalScreen.Y);
+                    restored = SetCursorPos(originalScreen.X, originalScreen.Y);
+                }
+
+                if (!restored)
+                {
+                    // Последний fallback: синхронизируем виртуальный курсор с фактической
+                    // экранной точкой, в которой Windows оставил системный курсор.
+                    if (GetCursorPos(out Point actualScreen))
+                    {
+                        Point actualClient = _visual.PointToClient(actualScreen);
+                        actualClient.X = ClampCursorX(actualClient.X);
+                        actualClient.Y = ClampCursorY(actualClient.Y);
+                        _lastGameCursorScreen = actualScreen;
+                        _lastGameCursorClient = actualClient;
+                        clientX = actualClient.X;
+                        clientY = actualClient.Y;
+                        QuestInputDiagnostics.Log(
+                            $"[SOFT-CURSOR][CALIBRATE] fallback actual=" +
+                            $"{actualScreen.X},{actualScreen.Y} client={clientX},{clientY}");
+                        return true;
+                    }
+
                     return false;
                 }
 
