@@ -92,6 +92,9 @@ namespace WebOverlay
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool GetCursorPos(out Point lpPoint);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetCursorPos(int X, int Y);
+
         private readonly OverlayForm _visual;
         private readonly Timer _logTimer;
         private readonly Timer _publishTimer;
@@ -113,8 +116,9 @@ namespace WebOverlay
         private ushort _lastButtonData;
         private IntPtr _lastDevice;
 
-        // Софт-курсор: положение берём из фактической позиции системного курсора,
-        // а движение/кнопки возбуждаются Raw Input. Сам системный курсор не управляем.
+        // Софтовый курсор живёт как виртуальная координата и СОХРАНЯЕТСЯ между
+        // паузами. GetCursorPos используется только при первичной синхронизации.
+        // После неё движение идёт исключительно по Raw Input dx/dy.
         private int _cursorX;
         private int _cursorY;
         private bool _cursorValid;
@@ -654,22 +658,81 @@ namespace WebOverlay
             _buttons = 0;
             _cursorDirty = false;
 
-            if (TryGetCursorClientPosition(out int cursorX, out int cursorY))
+            if (!_cursorValid)
             {
-                _cursorX = cursorX;
-                _cursorY = cursorY;
-                _cursorValid = true;
-                _cursorDirty = true;
-                QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][INIT] client={_cursorX},{_cursorY}");
+                if (TrySynchronizeCursorToGameTopLeft(out int cursorX, out int cursorY))
+                {
+                    _cursorX = cursorX;
+                    _cursorY = cursorY;
+                    _cursorValid = true;
+                    _cursorDirty = true;
+                    QuestInputDiagnostics.Log(
+                        $"[SOFT-CURSOR][INIT] first-sync client={_cursorX},{_cursorY}");
+                }
+                else
+                {
+                    _cursorValid = false;
+                    QuestInputDiagnostics.Log("[SOFT-CURSOR][INIT] first-sync failed");
+                }
             }
             else
             {
-                _cursorValid = false;
-                QuestInputDiagnostics.Log("[SOFT-CURSOR][INIT] GetCursorPos failed");
+                // Игра тоже сохраняет последнее положение между паузами.
+                // Поэтому НЕ сбрасываем виртуальный курсор и НЕ читаем заново GetCursorPos.
+                _cursorDirty = true;
+                QuestInputDiagnostics.Log(
+                    $"[SOFT-CURSOR][PRESERVE] client={_cursorX},{_cursorY}");
             }
 
             QuestInputDiagnostics.Log("[RAW-INPUT][SESSION] reset");
+        }
+
+        private bool TrySynchronizeCursorToGameTopLeft(out int clientX, out int clientY)
+        {
+            clientX = 0;
+            clientY = 0;
+
+            try
+            {
+                Point screenOrigin;
+
+                if (_visual != null && !_visual.IsDisposed && _visual.IsHandleCreated)
+                {
+                    screenOrigin = _visual.PointToScreen(Point.Empty);
+                }
+                else if (GetCursorPos(out Point current))
+                {
+                    // Fallback только если visual HWND ещё не готов.
+                    screenOrigin = current;
+                }
+                else
+                {
+                    QuestInputDiagnostics.Log(
+                        "[SOFT-CURSOR][INIT] no visual HWND and GetCursorPos failed");
+                    return false;
+                }
+
+                bool moved = SetCursorPos(screenOrigin.X, screenOrigin.Y);
+                int error = moved ? 0 : Marshal.GetLastWin32Error();
+
+                QuestInputDiagnostics.Log(
+                    $"[SOFT-CURSOR][SYNC] screen={screenOrigin.X},{screenOrigin.Y} " +
+                    $"setCursorPos={moved} error={error}");
+
+                if (!moved)
+                    return false;
+
+                // После SetCursorPos игра и наш виртуальный курсор оба считаются от (0,0).
+                clientX = 0;
+                clientY = 0;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log(
+                    $"[SOFT-CURSOR][SYNC] exception={ex.Message}");
+                return false;
+            }
         }
 
         protected override void Dispose(bool disposing)
