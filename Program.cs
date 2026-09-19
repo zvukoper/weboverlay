@@ -1648,6 +1648,8 @@ namespace WebOverlay
             try
             {
                 await webView.EnsureCoreWebView2Async(null);
+                // Host → page input bridge relies on WebView2 web messaging.
+                webView.CoreWebView2.Settings.IsWebMessageEnabled = true;
                 webView.CoreWebView2.NavigationCompleted += (s, e) =>
                 {
                     try
