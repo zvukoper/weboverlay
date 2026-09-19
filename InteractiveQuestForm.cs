@@ -6,107 +6,154 @@ using System.Windows.Forms;
 namespace WebOverlay
 {
     /// <summary>
-    /// NATIVE-ONLY INPUT-ПОВЕРХНОСТЬ ОКНА КВЕСТОВ (FIX v3).
+    /// ВРЕМЕННЫЙ RAW INPUT SINK ДЛЯ ДИАГНОСТИКИ КВЕСТОВ.
     ///
-    /// ПРИЧИНА СУЩЕСТВОВАНИЯ: окно с активным `LWA_COLORKEY` (он же
-    /// `TransparencyKey`) Windows ПОЛНОСТЬЮ исключает из desktop hit-test —
-    /// `WindowFromPoint` возвращает игру, а `WM_NCHITTEST` реально в WndProc
-    /// не приходит. Поэтому визуальный fullscreen-слой квестов (которому
-    /// color-key необходим для прозрачности) мышь принимать не может.
+    /// Этот HWND больше НЕ является native hit-test/input surface.
+    /// Он никогда не показывается, не перекрывает визуальный Quest WebView2
+    /// и не получает WM_MOUSE*. Его единственная задача на этом этапе —
+    /// зарегистрировать обычный Windows Raw Input для мыши и показать, что
+    /// приложение действительно получает RAWMOUSE.lLastX/lLastY.
     ///
-    /// ЧТО ЭТО: голое WinForms-окно БЕЗ `WebView2`, БЕЗ HTML, БЕЗ WebSocket,
-    /// БЕЗ второго DOM. Его единственная задача — получить native mouse-события
-    /// там, где лежит UI, и переслать их ОДНОЙ ОРИГИНАЛЬНОЙ странице квестов
-    /// через `CoreWebView2.PostWebMessageAsJson`.
-    ///
-    /// ЦЕПОЧКА:
-    ///   physical mouse → InteractiveQuestForm (native) →
-    ///   PostWebMessageAsJson → quests_ui.js → synthetic MouseEvent на target →
-    ///   существующие обработчики → QuestRuntime.
-    ///
-    /// ПОЧЕМУ НЕ COLOR-KEY ЗДЕСЬ: это окно ДОЛЖНО попадать в hit-test.
-    /// Используется `WS_EX_LAYERED` + `LWA_ALPHA = 1`: alpha ненулевая, поэтому
-    /// правило «alpha=0 пропускает мышь» не применяется, а окно визуально
-    /// практически не видно (никакого чёрного прямоугольника).
+    /// Никаких SetCursorPos/ShowCursor/SetCursor, ClipCursor, mouse hook или
+    /// блокировки обычных mouse-сообщений здесь нет.
     /// </summary>
     internal sealed class InteractiveQuestForm : Form
     {
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_NOACTIVATE = 0x08000000;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
-        private const int WS_EX_LAYERED = 0x00080000;
         private const int WS_EX_TRANSPARENT = 0x00000020;
-        private const int LWA_ALPHA = 0x00000002;
-        private const int SWP_NOMOVE = 0x0002;
-        private const int SWP_NOSIZE = 0x0001;
-        private const int SWP_NOACTIVATE = 0x0010;
-        private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
 
-        private const int WM_MOUSEMOVE = 0x0200;
-        private const int WM_LBUTTONDOWN = 0x0201;
-        private const int WM_LBUTTONUP = 0x0202;
-        private const int WM_LBUTTONDBLCLK = 0x0203;
-        private const int WM_RBUTTONDOWN = 0x0204;
-        private const int WM_RBUTTONUP = 0x0205;
-        private const int WM_MBUTTONDOWN = 0x0207;
-        private const int WM_MBUTTONUP = 0x0208;
-        private const int WM_MOUSEWHEEL = 0x020A;
-        private const int WM_MOUSELEAVE = 0x02A3;
-        private const int WM_MOUSEACTIVATE = 0x0021;
-        private const int MA_NOACTIVATE = 0x0003;
+        private const int WM_INPUT = 0x00FF;
+        private const uint RID_INPUT = 0x10000003;
+        private const uint RIM_TYPEMOUSE = 0;
+        private const uint RIDEV_INPUTSINK = 0x00000100;
+        private const uint RIDEV_REMOVE = 0x00000001;
 
-        [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-        [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-        [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, int uFlags);
-        [DllImport("user32.dll")] private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, int crKey, byte bAlpha, int dwFlags);
-        [DllImport("user32.dll")] private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint crKey, out byte bAlpha, out uint dwFlags);
+        private const ushort HID_USAGE_PAGE_GENERIC = 0x01;
+        private const ushort HID_USAGE_GENERIC_MOUSE = 0x02;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RAWINPUTDEVICE
+        {
+            public ushort usUsagePage;
+            public ushort usUsage;
+            public uint dwFlags;
+            public IntPtr hwndTarget;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RAWINPUTHEADER
+        {
+            public uint dwType;
+            public uint dwSize;
+            public IntPtr hDevice;
+            public IntPtr wParam;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct RAWMOUSE
+        {
+            [FieldOffset(0)] public ushort usFlags;
+            [FieldOffset(4)] public uint ulButtons;
+            [FieldOffset(4)] public ushort usButtonFlags;
+            [FieldOffset(6)] public ushort usButtonData;
+            [FieldOffset(8)] public uint ulRawButtons;
+            [FieldOffset(12)] public int lLastX;
+            [FieldOffset(16)] public int lLastY;
+            [FieldOffset(20)] public uint ulExtraInformation;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterRawInputDevices(
+            RAWINPUTDEVICE[] pRawInputDevices,
+            uint uiNumDevices,
+            uint cbSize);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetRawInputData(
+            IntPtr hRawInput,
+            uint uiCommand,
+            IntPtr pData,
+            ref uint pcbSize,
+            uint cbSizeHeader);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
         private readonly OverlayForm _visual;
-        private readonly Timer _layoutTimer;
         private readonly Timer _logTimer;
+        private readonly Timer _publishTimer;
 
         private bool _layerHidden;
         private string _mode = "hidden";
-        private double _xr, _yr, _wr, _hr;
-        private Size _lastVisualClient = Size.Empty;
-        private DateTime _lastHitLogUtc = DateTime.MinValue;
-        private Point _lastNativePoint = new(-1, -1);
+        private bool _rawRegistered;
+        private DateTime _lastRawUtc = DateTime.MinValue;
 
-        // Счётчики native-событий и пересылки (диагностика §24).
-        internal long NativeMove, NativeDown, NativeUp, NativeWheel;
-        internal long ForwardMove, ForwardDown, ForwardUp, ForwardWheel;
-        internal Point LastPagePoint = new(-1, -1);
+        private long _rawPackets;
+        private long _rawPacketsAllStates;
+        private long _totalDx;
+        private long _totalDy;
+        private int _lastDx;
+        private int _lastDy;
+        private ushort _lastFlags;
+        private ushort _lastButtonFlags;
+        private ushort _lastButtonData;
+        private IntPtr _lastDevice;
+
+        internal long RawPackets => _rawPackets;
+        internal long RawPacketsAllStates => _rawPacketsAllStates;
+        internal long RawTotalDx => _totalDx;
+        internal long RawTotalDy => _totalDy;
+        internal int RawLastDx => _lastDx;
+        internal int RawLastDy => _lastDy;
 
         internal string Url { get; }
         internal string Mode => _mode;
+        internal bool IsLayerHidden => _layerHidden;
+
+        private bool RawSessionActive =>
+            !_layerHidden &&
+            !string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase);
 
         internal InteractiveQuestForm(string url, AppConfig config, OverlayForm visual)
         {
             Url = url;
             _visual = visual;
 
-            // НИЧЕГО не рисуем: только поверхность для мыши.
+            // Это больше НЕ визуальная и НЕ hit-test поверхность.
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
-            TopMost = true;
-            BackColor = Color.Black;   // видно не будет: LWA_ALPHA = 1
+            TopMost = false;
+            BackColor = Color.Transparent;
             KeyPreview = false;
-            Text = "ETS2 Assist quest input";
+            Text = "ETS2 Assist raw input sink";
 
-            Size = visual.ClientSize.Width > 0 ? visual.ClientSize : new Size(1920, 1080);
-            _lastVisualClient = _visual.ClientSize;
-
-            _layoutTimer = new Timer { Interval = 500 };
-            _layoutTimer.Tick += (_, _) => LayoutInteractive();
-            _layoutTimer.Start();
+            // Нужен реальный HWND, но окно никогда не показываем.
+            Size = new Size(1, 1);
+            Location = new Point(-32000, -32000);
 
             _logTimer = new Timer { Interval = 1000 };
             _logTimer.Tick += (_, _) => LogRuntime();
             _logTimer.Start();
 
-            QuestInputDiagnostics.Log("[QUEST-FIX][INIT] native-only input surface " +
-                "(no WebView2, no HTML, no extra DOM; forwarding to the original quest page)");
+            _publishTimer = new Timer { Interval = 100 };
+            _publishTimer.Tick += (_, _) => PublishDiagnostics();
+            _publishTimer.Start();
+
+            try
+            {
+                CreateHandle();
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log($"[RAW-INPUT][INIT] CreateHandle error={ex.Message}");
+            }
+
+            QuestInputDiagnostics.Log(
+                "[RAW-INPUT][INIT] hidden sink created; native hit-test DISABLED; " +
+                "no WM_MOUSE forwarding, no cursor ownership");
         }
 
         protected override bool ShowWithoutActivation => true;
@@ -116,8 +163,7 @@ namespace WebOverlay
             get
             {
                 CreateParams cp = base.CreateParams;
-                // ⛔ Без WS_EX_TRANSPARENT: окно ОБЯЗАНО попадать в hit-test.
-                cp.ExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
+                cp.ExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT;
                 return cp;
             }
         }
@@ -125,331 +171,290 @@ namespace WebOverlay
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            ApplyInputSurfaceStyle();
+            RegisterRawMouse();
         }
 
-        /// <summary>
-        /// WS_EX_LAYERED + LWA_ALPHA = 1. Цветовой ключ НЕ используется:
-        /// color-key исключает окно из hit-test, а здесь он ещё и не нужен —
-        /// мы ничего не рисуем.
-        /// </summary>
-        private void ApplyInputSurfaceStyle()
+        protected override void OnHandleDestroyed(EventArgs e)
         {
+            UnregisterRawMouse();
+            base.OnHandleDestroyed(e);
+        }
+
+        private void RegisterRawMouse()
+        {
+            if (!IsHandleCreated)
+                return;
+
             try
             {
-                if (!IsHandleCreated)
-                    return;
-
-                int ex = GetWindowLong(Handle, GWL_EXSTYLE);
-                int desired = (ex | WS_EX_LAYERED) & ~WS_EX_TRANSPARENT;
-                if (desired != ex)
+                var devices = new[]
                 {
-                    SetWindowLong(Handle, GWL_EXSTYLE, desired);
-                    SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                }
+                    new RAWINPUTDEVICE
+                    {
+                        usUsagePage = HID_USAGE_PAGE_GENERIC,
+                        usUsage = HID_USAGE_GENERIC_MOUSE,
+                        dwFlags = RIDEV_INPUTSINK,
+                        hwndTarget = Handle
+                    }
+                };
 
-                // alpha=1: ненулевая => мышь НЕ пропускается, но окно не видно.
-                SetLayeredWindowAttributes(Handle, 0, 1, LWA_ALPHA);
+                bool ok = RegisterRawInputDevices(
+                    devices,
+                    (uint)devices.Length,
+                    (uint)Marshal.SizeOf<RAWINPUTDEVICE>());
+
+                _rawRegistered = ok;
+                int error = ok ? 0 : Marshal.GetLastWin32Error();
+
+                QuestInputDiagnostics.Log(
+                    $"[RAW-INPUT][REGISTER] ok={ok} error={error} hwnd=0x{Handle.ToInt64():X} " +
+                    $"usagePage=0x{HID_USAGE_PAGE_GENERIC:X2} usage=0x{HID_USAGE_GENERIC_MOUSE:X2} " +
+                    $"flags=0x{RIDEV_INPUTSINK:X}");
             }
             catch (Exception ex)
             {
-                QuestInputDiagnostics.Log($"[QUEST-FIX][STYLE] error: {ex.Message}");
+                _rawRegistered = false;
+                QuestInputDiagnostics.Log($"[RAW-INPUT][REGISTER] exception={ex.Message}");
             }
         }
 
-        // ================================================================
-        // NATIVE MOUSE → ORIGINAL PAGE
-        // ================================================================
+        private void UnregisterRawMouse()
+        {
+            if (!IsHandleCreated)
+                return;
+
+            try
+            {
+                var devices = new[]
+                {
+                    new RAWINPUTDEVICE
+                    {
+                        usUsagePage = HID_USAGE_PAGE_GENERIC,
+                        usUsage = HID_USAGE_GENERIC_MOUSE,
+                        dwFlags = RIDEV_REMOVE,
+                        hwndTarget = IntPtr.Zero
+                    }
+                };
+
+                bool ok = RegisterRawInputDevices(
+                    devices,
+                    (uint)devices.Length,
+                    (uint)Marshal.SizeOf<RAWINPUTDEVICE>());
+
+                QuestInputDiagnostics.Log(
+                    $"[RAW-INPUT][UNREGISTER] ok={ok} error={(ok ? 0 : Marshal.GetLastWin32Error())}");
+            }
+            catch { }
+
+            _rawRegistered = false;
+        }
+
         protected override void WndProc(ref Message m)
         {
-            switch (m.Msg)
+            if (m.Msg == WM_INPUT)
             {
-                case WM_MOUSEACTIVATE:
-                    // Never let the transparent input surface become the foreground window.
-                    m.Result = new IntPtr(MA_NOACTIVATE);
-                    return;
-
-                case WM_MOUSEMOVE:
-                    NativeMove++;
-                    _lastNativePoint = PointFromLParam(m.LParam);
-                    Forward("mousemove", _lastNativePoint, 0, MouseButtonsFromWParam(m.WParam));
-                    break;
-                case WM_LBUTTONDOWN:
-                case WM_LBUTTONDBLCLK:
-                    NativeDown++;
-                    Forward("mousedown", PointFromLParam(m.LParam), 0, 1);
-                    break;
-                case WM_LBUTTONUP:
-                    NativeUp++;
-                    Forward("mouseup", PointFromLParam(m.LParam), 0, 0);
-                    break;
-                case WM_RBUTTONDOWN:
-                    NativeDown++;
-                    Forward("mousedown", PointFromLParam(m.LParam), 2, 2);
-                    break;
-                case WM_RBUTTONUP:
-                    NativeUp++;
-                    Forward("mouseup", PointFromLParam(m.LParam), 2, 0);
-                    break;
-                case WM_MBUTTONDOWN:
-                    NativeDown++;
-                    Forward("mousedown", PointFromLParam(m.LParam), 1, 4);
-                    break;
-                case WM_MBUTTONUP:
-                    NativeUp++;
-                    Forward("mouseup", PointFromLParam(m.LParam), 1, 0);
-                    break;
-                case WM_MOUSEWHEEL:
-                    NativeWheel++;
-                    int delta = unchecked((short)((long)m.WParam >> 16));
-                    // WM_MOUSEWHEEL.lParam is in SCREEN coordinates, unlike WM_MOUSEMOVE.
-                    var wheelScreen = PointFromLParam(m.LParam);
-                    var wheelLocal = PointToClient(wheelScreen);
-                    Forward("wheel", wheelLocal, 0, MouseButtonsFromWParam(m.WParam), delta);
-                    break;
-                case WM_MOUSELEAVE:
-                    _lastNativePoint = new Point(-1, -1);
-                    break;
+                HandleRawInput(m.LParam);
+                m.Result = IntPtr.Zero;
+                return;
             }
 
+            // Даже если этот HWND случайно станет видимым во время отладки,
+            // он не должен участвовать в обычном мышином hit-test.
             base.WndProc(ref m);
         }
 
-        private static Point PointFromLParam(IntPtr lParam)
-        {
-            long v = lParam.ToInt64();
-            return new Point(unchecked((short)(v & 0xFFFF)), unchecked((short)((v >> 16) & 0xFFFF)));
-        }
-
-        private static int MouseButtonsFromWParam(IntPtr wParam)
-        {
-            int flags = wParam.ToInt32();
-            int buttons = 0;
-            if ((flags & 0x0001) != 0) buttons |= 1; // MK_LBUTTON
-            if ((flags & 0x0002) != 0) buttons |= 2; // MK_RBUTTON
-            if ((flags & 0x0010) != 0) buttons |= 4; // MK_MBUTTON
-            return buttons;
-        }
-
-        /// <summary>
-        /// Пересчёт native local точки в координаты СТРАНИЦЫ.
-        /// Идём через РАЗМЕР ВИЗУАЛЬНОГО КЛИЕНТА, а не через screen resolution:
-        /// страница видит ровно этот viewport.
-        /// </summary>
-        private bool TryToPagePoint(Point local, out int pageX, out int pageY)
-        {
-            pageX = pageY = 0;
-            Size vc = _visual.IsDisposed || !_visual.IsHandleCreated ? Size.Empty : _visual.ClientSize;
-            if (vc.Width <= 0 || vc.Height <= 0)
-                return false;
-
-            int boundsPageX = (int)Math.Round(_xr * vc.Width);
-            int boundsPageY = (int)Math.Round(_yr * vc.Height);
-            pageX = boundsPageX + local.X;
-            pageY = boundsPageY + local.Y;
-            return true;
-        }
-
-        private void Forward(string type, Point local, int button, int buttons, int wheelDelta = 0)
+        private void HandleRawInput(IntPtr hRawInput)
         {
             try
             {
-                if (!TryToPagePoint(local, out int pageX, out int pageY))
-                    return;
+                _rawPacketsAllStates++;
 
-                LastPagePoint = new Point(pageX, pageY);
-
-                switch (type)
+                uint size = 0;
+                uint headerSize = (uint)Marshal.SizeOf<RAWINPUTHEADER>();
+                uint query = GetRawInputData(hRawInput, RID_INPUT, IntPtr.Zero, ref size, headerSize);
+                if (query == uint.MaxValue || size == 0)
                 {
-                    case "mousemove": ForwardMove++; break;
-                    case "mousedown": ForwardDown++; break;
-                    case "mouseup": ForwardUp++; break;
-                    case "wheel": ForwardWheel++; break;
+                    if (_rawPacketsAllStates <= 5)
+                        QuestInputDiagnostics.Log(
+                            $"[RAW-INPUT][READ] size-query-failed result={query} size={size} error={Marshal.GetLastWin32Error()}");
+                    return;
                 }
 
+                IntPtr buffer = Marshal.AllocHGlobal(checked((int)size));
+                try
+                {
+                    uint readSize = size;
+                    uint result = GetRawInputData(hRawInput, RID_INPUT, buffer, ref readSize, headerSize);
+                    if (result == uint.MaxValue || readSize < headerSize)
+                    {
+                        if (_rawPacketsAllStates <= 5)
+                            QuestInputDiagnostics.Log(
+                                $"[RAW-INPUT][READ] failed result={result} readSize={readSize} size={size} error={Marshal.GetLastWin32Error()}");
+                        return;
+                    }
+
+                    RAWINPUTHEADER header =
+                        Marshal.PtrToStructure<RAWINPUTHEADER>(buffer);
+
+                    if (header.dwType != RIM_TYPEMOUSE)
+                        return;
+
+                    RAWMOUSE mouse = Marshal.PtrToStructure<RAWMOUSE>(
+                        IntPtr.Add(buffer, Marshal.SizeOf<RAWINPUTHEADER>()));
+
+                    int dx = mouse.lLastX;
+                    int dy = mouse.lLastY;
+
+                    if (!RawSessionActive)
+                        return;
+
+                    _rawPackets++;
+                    _lastDx = dx;
+                    _lastDy = dy;
+                    _lastFlags = mouse.usFlags;
+                    _lastButtonFlags = mouse.usButtonFlags;
+                    _lastButtonData = mouse.usButtonData;
+                    _lastDevice = header.hDevice;
+                    _lastRawUtc = DateTime.UtcNow;
+
+                    _totalDx += dx;
+                    _totalDy += dy;
+
+                    if (_rawPackets <= 8 || (_rawPackets % 60) == 0)
+                    {
+                        QuestInputDiagnostics.Log(
+                            $"[RAW-INPUT][PACKET] n={_rawPackets} dx={dx} dy={dy} " +
+                            $"flags=0x{mouse.usFlags:X4} buttonFlags=0x{mouse.usButtonFlags:X4} " +
+                            $"buttonData={mouse.usButtonData} device=0x{header.hDevice.ToInt64():X} " +
+                            $"total={_totalDx},{_totalDy}");
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log($"[RAW-INPUT][HANDLE] error={ex.Message}");
+            }
+        }
+
+        private void PublishDiagnostics()
+        {
+            if (!RawSessionActive)
+                return;
+
+            try
+            {
                 _visual.PostQuestInput(new
                 {
-                    source = "quest-native-input",
-                    type,
-                    x = pageX,
-                    y = pageY,
-                    button,
-                    buttons,
-                    wheelDelta
+                    source = "quest-raw-input-test",
+                    active = true,
+                    registered = _rawRegistered,
+                    packets = _rawPackets,
+                    totalDx = _totalDx,
+                    totalDy = _totalDy,
+                    dx = _lastDx,
+                    dy = _lastDy,
+                    flags = _lastFlags,
+                    buttonFlags = _lastButtonFlags,
+                    buttonData = _lastButtonData,
+                    device = $"0x{_lastDevice.ToInt64():X}",
+                    lastRawUtc = _lastRawUtc == DateTime.MinValue ? "" : _lastRawUtc.ToString("HH:mm:ss.fff")
                 });
             }
             catch (Exception ex)
             {
-                QuestInputDiagnostics.Log($"[QUEST-FIX][FORWARD] error: {ex.Message}");
+                QuestInputDiagnostics.Log($"[RAW-INPUT][PUBLISH] error={ex.Message}");
             }
         }
 
-        // ================================================================
-        // GEOMETRY
-        // ================================================================
-        internal void SetBoundsRatios(string mode, double xr, double yr, double wr, double hr)
-        {
-            bool changed = mode != _mode ||
-                           Math.Abs(xr - _xr) > 0.0005 || Math.Abs(yr - _yr) > 0.0005 ||
-                           Math.Abs(wr - _wr) > 0.0005 || Math.Abs(hr - _hr) > 0.0005;
-
-            _mode = mode;
-            _xr = xr; _yr = yr; _wr = wr; _hr = hr;
-
-            if (changed)
-            {
-                QuestInputDiagnostics.Log($"[QUEST-FIX][BOUNDS] mode={mode} xr={xr:F4} yr={yr:F4} wr={wr:F4} hr={hr:F4}");
-            }
-
-            LayoutInteractive();
-        }
-
-        private void LayoutInteractive()
-        {
-            try
-            {
-                if (IsDisposed)
-                    return;
-
-                if (!IsHandleCreated)
-                    CreateHandle();
-                if (!IsHandleCreated)
-                    return;
-
-                ApplyInputSurfaceStyle();
-
-                Size vc = _visual.IsDisposed || !_visual.IsHandleCreated ? Size.Empty : _visual.ClientSize;
-                if (vc.Width > 0 && vc.Height > 0)
-                    _lastVisualClient = vc;
-
-                if (_mode == "hidden" || _layerHidden || _visual.IsDisposed || vc.Width <= 0 || vc.Height <= 0)
-                {
-                    if (Visible)
-                        Hide();
-                    return;
-                }
-
-                int x = (int)Math.Round(_xr * vc.Width);
-                int y = (int)Math.Round(_yr * vc.Height);
-                int w = (int)Math.Round(_wr * vc.Width);
-                int h = (int)Math.Round(_hr * vc.Height);
-                if (w < 2 || h < 2)
-                {
-                    if (Visible)
-                        Hide();
-                    return;
-                }
-
-                int screenX = _visual.Left + x;
-                int screenY = _visual.Top + y;
-                SetBounds(screenX, screenY, w, h);
-
-                if (!Visible)
-                    Show();
-
-                // Всегда поднимаем input ВЫШЕ визуального слоя (он тоже TopMost),
-                // без активации: foreground остаётся у ETS2.
-                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-            catch (Exception ex)
-            {
-                QuestInputDiagnostics.Log($"[QUEST-FIX][BOUNDS] layout error: {ex.Message}");
-            }
-        }
-
-        /// <summary>Гарантирует, что input-окно выше визуального (вызывает OverlayForm).</summary>
-        internal void RaiseAboveVisual()
-        {
-            try
-            {
-                if (!IsHandleCreated || !Visible)
-                    return;
-                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-            catch { }
-        }
-
-        /// <summary>Политика оверлеев: фокус ушёл из игры — прячемся.</summary>
-        internal void SetLayerHidden(bool hidden)
-        {
-            _layerHidden = hidden;
-            LayoutInteractive();
-        }
-
-        internal bool IsLayerHidden => _layerHidden;
-
-        // ================================================================
-        // ДИАГНОСТИКА (§24): компактно, раз в секунду.
-        // ================================================================
         private void LogRuntime()
         {
             try
             {
-                if (!IsHandleCreated)
-                    return;
-
-                int ex = GetWindowLong(Handle, GWL_EXSTYLE);
-                bool hasColorKey = false;
-                uint colorKey = 0;
-                uint flags = 0;
-                try { hasColorKey = GetLayeredWindowAttributes(Handle, out colorKey, out _, out flags); } catch { }
-
                 QuestInputDiagnostics.Log(
-                    $"[QUEST-FIX][WINDOW] visualHwnd=0x{_visual.Handle.ToInt64():X} interactiveHwnd=0x{Handle.ToInt64():X} " +
-                    $"mode={_mode} visualRect={_visual.Left},{_visual.Top},{_visual.Width}x{_visual.Height} " +
-                    $"interactiveRect={Left},{Top},{Width}x{Height} interactiveVisible={Visible} " +
-                    $"exStyle=0x{ex:X8} layered={(ex & WS_EX_LAYERED) != 0} transparent={(ex & WS_EX_TRANSPARENT) != 0} " +
-                    $"noactivate={(ex & WS_EX_NOACTIVATE) != 0} toolwindow={(ex & WS_EX_TOOLWINDOW) != 0} " +
-                    $"hasColorKey={hasColorKey} colorKey=0x{colorKey:X8} layeredFlags=0x{flags:X8} " +
-                    $"foreground={QuestInputDiagnostics.ForegroundText()}");
-
-                QuestInputDiagnostics.Log(
-                    $"[QUEST-FIX][NATIVE-MOUSE] move={NativeMove} down={NativeDown} up={NativeUp} wheel={NativeWheel} last={_lastNativePoint.X},{_lastNativePoint.Y}");
-
-                QuestInputDiagnostics.Log(
-                    $"[QUEST-FIX][FORWARD] move={ForwardMove} down={ForwardDown} up={ForwardUp} wheel={ForwardWheel} lastPagePoint={LastPagePoint.X},{LastPagePoint.Y}");
-
-                LogHitTest();
+                    $"[RAW-INPUT][SUMMARY] registered={_rawRegistered} active={RawSessionActive} " +
+                    $"mode={_mode} layerHidden={_layerHidden} packets={_rawPackets} " +
+                    $"allStates={_rawPacketsAllStates} lastDx={_lastDx} lastDy={_lastDy} " +
+                    $"total={_totalDx},{_totalDy} flags=0x{_lastFlags:X4} " +
+                    $"buttonFlags=0x{_lastButtonFlags:X4}");
             }
             catch { }
         }
 
         /// <summary>
-        /// [QUEST-FIX][HITTEST] — пишем при СМЕНЕ результата (не каждый кадр).
-        /// Ожидаемое состояние: внутри UI WindowFromPoint == ЭТО окно
-        /// (у нас больше нет своего WebView2, поэтому результат однозначен).
+        /// Геометрия старого native input-window больше не применяется.
+        /// Сохраняем API, чтобы не трогать остальные части хоста.
         /// </summary>
+        internal void SetBoundsRatios(string mode, double xr, double yr, double wr, double hr)
+        {
+            bool changed = !string.Equals(mode, _mode, StringComparison.OrdinalIgnoreCase);
+
+            if (changed && string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(mode, "hidden", StringComparison.OrdinalIgnoreCase))
+            {
+                ResetRawSession();
+            }
+
+            _mode = mode ?? "hidden";
+
+            if (changed)
+            {
+                QuestInputDiagnostics.Log(
+                    $"[RAW-INPUT][STATE] mode={_mode} active={RawSessionActive} " +
+                    $"ratios={xr:F4},{yr:F4},{wr:F4},{hr:F4}");
+            }
+
+            Hide();
+        }
+
+        internal void SetLayerHidden(bool hidden)
+        {
+            _layerHidden = hidden;
+            if (hidden)
+                Hide();
+
+            QuestInputDiagnostics.Log(
+                $"[RAW-INPUT][LAYER] hidden={hidden} active={RawSessionActive}");
+        }
+
+        internal void RaiseAboveVisual()
+        {
+            // Intentionally empty: the raw-input sink must remain invisible.
+        }
+
         internal void LogHitTest(bool force = false)
         {
-            try
-            {
-                if (!IsHandleCreated || !QuestInputDiagnostics.TryGetCursor(out Point pt))
-                    return;
+            // Native hit-test diagnostics intentionally disabled for this phase.
+        }
 
-                IntPtr under = QuestInputDiagnostics.WindowAt(pt);
-                bool match = under == Handle;
-                if (!force && (DateTime.UtcNow - _lastHitLogUtc).TotalMilliseconds < 1000)
-                    return;
-                _lastHitLogUtc = DateTime.UtcNow;
+        private void ResetRawSession()
+        {
+            _rawPackets = 0;
+            _totalDx = 0;
+            _totalDy = 0;
+            _lastDx = 0;
+            _lastDy = 0;
+            _lastFlags = 0;
+            _lastButtonFlags = 0;
+            _lastButtonData = 0;
+            _lastDevice = IntPtr.Zero;
+            _lastRawUtc = DateTime.MinValue;
 
-                IntPtr gameHwnd = QuestInputDiagnostics.FindGameWindow();
-                QuestInputDiagnostics.Log(
-                    $"[QUEST-FIX][HITTEST] cursor={pt.X},{pt.Y} windowFromPoint=0x{under.ToInt64():X} " +
-                    $"windowClass={QuestInputDiagnostics.ClassOf(under)} windowPid={QuestInputDiagnostics.PidOf(under)} " +
-                    $"interactiveHwnd=0x{Handle.ToInt64():X} interactiveMatch={match} " +
-                    $"visualHwnd=0x{_visual.Handle.ToInt64():X} gameHwnd=0x{gameHwnd.ToInt64():X}");
-            }
-            catch { }
+            QuestInputDiagnostics.Log("[RAW-INPUT][SESSION] reset");
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                try { _layoutTimer?.Stop(); _layoutTimer?.Dispose(); } catch { }
-                try { _logTimer?.Stop(); _logTimer?.Dispose(); } catch { }
+                try { _logTimer.Stop(); _logTimer.Dispose(); } catch { }
+                try { _publishTimer.Stop(); _publishTimer.Dispose(); } catch { }
+                try { Hide(); } catch { }
             }
+
             base.Dispose(disposing);
         }
     }
