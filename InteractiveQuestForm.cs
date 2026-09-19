@@ -709,8 +709,11 @@ namespace WebOverlay
                 _buttons = 0;
                 Hide();
             }
-            else if (wasHidden && string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase))
+            else if (wasHidden && !string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase))
             {
+                // Слой мог вернуться уже в quest-tab/inventory/quest-window.
+                // Во всех этих режимах после скрытия нужна одинаковая нулевая
+                // калибровка, иначе виртуальный курсор и игровой курсор расходятся.
                 ResetRawSession();
             }
 
