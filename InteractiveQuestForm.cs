@@ -126,6 +126,8 @@ namespace WebOverlay
         private bool _cursorValid;
         private bool _cursorDirty;
         private int _buttons;
+        private bool _cursorCalibrationActive;
+        private DateTime _ignoreRawUntilUtc = DateTime.MinValue;
 
         internal long RawPackets => _rawPackets;
         internal long RawPacketsAllStates => _rawPacketsAllStates;
@@ -343,6 +345,12 @@ namespace WebOverlay
                     int dy = mouse.lLastY;
 
                     if (!RawSessionActive)
+                        return;
+
+                    // SetCursorPos используется для калибровки через (0,0) и может
+                    // породить отложенное событие движения. Не даём этому событию
+                    // сдвинуть уже восстановленную координату.
+                    if (_cursorCalibrationActive || DateTime.UtcNow < _ignoreRawUntilUtc)
                         return;
 
                     if (!_cursorValid)
@@ -669,80 +677,118 @@ namespace WebOverlay
             _buttons = 0;
             _cursorDirty = false;
 
-            if (!_cursorValid)
+            if (TryCalibrateCursorFromCurrentGamePosition(out int cursorX, out int cursorY))
             {
-                if (TrySynchronizeCursorToGameTopLeft(out int cursorX, out int cursorY))
-                {
-                    _cursorX = cursorX;
-                    _cursorY = cursorY;
-                    _cursorValid = true;
-                    _cursorDirty = true;
-                    QuestInputDiagnostics.Log(
-                        $"[SOFT-CURSOR][INIT] first-sync client={_cursorX},{_cursorY}");
-                }
-                else
-                {
-                    _cursorValid = false;
-                    QuestInputDiagnostics.Log("[SOFT-CURSOR][INIT] first-sync failed");
-                }
+                _cursorX = cursorX;
+                _cursorY = cursorY;
+                _cursorValid = true;
+                _cursorDirty = true;
+                QuestInputDiagnostics.Log(
+                    $"[SOFT-CURSOR][CALIBRATE] restored client={_cursorX},{_cursorY}");
+            }
+            else if (_cursorValid)
+            {
+                // Если получить/переместить системный курсор не удалось, оставляем
+                // последнюю валидную виртуальную позицию как безопасный fallback.
+                _cursorDirty = true;
+                QuestInputDiagnostics.Log(
+                    $"[SOFT-CURSOR][CALIBRATE] fallback preserve client={_cursorX},{_cursorY}");
             }
             else
             {
-                // Игра тоже сохраняет последнее положение между паузами.
-                // Поэтому НЕ сбрасываем виртуальный курсор и НЕ читаем заново GetCursorPos.
-                _cursorDirty = true;
-                QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][PRESERVE] client={_cursorX},{_cursorY}");
+                _cursorValid = false;
+                QuestInputDiagnostics.Log("[SOFT-CURSOR][CALIBRATE] failed; no cursor position");
             }
 
             QuestInputDiagnostics.Log("[RAW-INPUT][SESSION] reset");
         }
 
-        private bool TrySynchronizeCursorToGameTopLeft(out int clientX, out int clientY)
+        private bool TryCalibrateCursorFromCurrentGamePosition(out int clientX, out int clientY)
         {
             clientX = 0;
             clientY = 0;
 
             try
             {
-                Point screenOrigin;
-
-                if (_visual != null && !_visual.IsDisposed && _visual.IsHandleCreated)
-                {
-                    screenOrigin = _visual.PointToScreen(Point.Empty);
-                }
-                else if (GetCursorPos(out Point current))
-                {
-                    // Fallback только если visual HWND ещё не готов.
-                    screenOrigin = current;
-                }
-                else
+                if (_visual == null || _visual.IsDisposed || !_visual.IsHandleCreated)
                 {
                     QuestInputDiagnostics.Log(
-                        "[SOFT-CURSOR][INIT] no visual HWND and GetCursorPos failed");
+                        "[SOFT-CURSOR][CALIBRATE] visual HWND is not ready");
                     return false;
                 }
 
-                bool moved = SetCursorPos(screenOrigin.X, screenOrigin.Y);
-                int error = moved ? 0 : Marshal.GetLastWin32Error();
+                // GetCursorPos — это доступная Windows экранная координата того же
+                // физического курсора, положение которого ETS2 использует для своей
+                // экранной стрелки. Отдельного Win32 API "GetGameCursorPos" нет.
+                if (!GetCursorPos(out Point originalScreen))
+                {
+                    QuestInputDiagnostics.Log(
+                        $"[SOFT-CURSOR][CALIBRATE] GetCursorPos failed error={Marshal.GetLastWin32Error()}");
+                    return false;
+                }
+
+                Point originalClient = _visual.PointToClient(originalScreen);
+                originalClient.X = ClampCursorX(originalClient.X);
+                originalClient.Y = ClampCursorY(originalClient.Y);
+
+                Point screenOrigin = _visual.PointToScreen(Point.Empty);
 
                 QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][SYNC] screen={screenOrigin.X},{screenOrigin.Y} " +
-                    $"setCursorPos={moved} error={error}");
+                    $"[SOFT-CURSOR][CALIBRATE] game-screen={originalScreen.X},{originalScreen.Y} " +
+                    $"game-client={originalClient.X},{originalClient.Y} " +
+                    $"zero-screen={screenOrigin.X},{screenOrigin.Y}");
 
-                if (!moved)
+                _cursorCalibrationActive = true;
+
+                bool movedToZero = SetCursorPos(screenOrigin.X, screenOrigin.Y);
+                if (!movedToZero)
+                {
+                    QuestInputDiagnostics.Log(
+                        $"[SOFT-CURSOR][CALIBRATE] move-to-zero failed error={Marshal.GetLastWin32Error()}");
                     return false;
+                }
 
-                // После SetCursorPos игра и наш виртуальный курсор оба считаются от (0,0).
-                clientX = 0;
-                clientY = 0;
+                // Нулевая точка одинакова для реального и виртуального курсора.
+                _cursorX = 0;
+                _cursorY = 0;
+                _cursorValid = true;
+
+                bool restored = SetCursorPos(originalScreen.X, originalScreen.Y);
+                if (!restored)
+                {
+                    QuestInputDiagnostics.Log(
+                        $"[SOFT-CURSOR][CALIBRATE] restore failed error={Marshal.GetLastWin32Error()}");
+
+                    // Не оставляем системный курсор в (0,0), если восстановление
+                    // исходной точки не удалось с первого вызова.
+                    SetCursorPos(originalScreen.X, originalScreen.Y);
+                    return false;
+                }
+
+                // Возвращаем виртуальный курсор в ТОЧНО ту же исходную точку.
+                clientX = originalClient.X;
+                clientY = originalClient.Y;
+
+                // Небольшое окно гашения защищает от отложенного WM_INPUT,
+                // возникшего на SetCursorPos. Реальное движение после этого
+                // продолжается обычным Raw Input.
+                _ignoreRawUntilUtc = DateTime.UtcNow.AddMilliseconds(40);
+
+                QuestInputDiagnostics.Log(
+                    $"[SOFT-CURSOR][CALIBRATE] zero=(0,0) restored=" +
+                    $"{originalScreen.X},{originalScreen.Y} client={clientX},{clientY}");
+
                 return true;
             }
             catch (Exception ex)
             {
                 QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][SYNC] exception={ex.Message}");
+                    $"[SOFT-CURSOR][CALIBRATE] exception={ex.Message}");
                 return false;
+            }
+            finally
+            {
+                _cursorCalibrationActive = false;
             }
         }
 
