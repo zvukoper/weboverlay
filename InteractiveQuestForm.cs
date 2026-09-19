@@ -465,9 +465,14 @@ namespace WebOverlay
             }
         }
 
+        // Любой непустой режим интерактивного слоя должен продолжать
+        // публиковать виртуальную мышь. GUI использует конкретные имена
+        // "quest-tab", "quest-window" и "inventory"; старая проверка только
+        // на "window" делала Raw Input рабочим, но полностью отключала
+        // quest-native-input после перехода на safe-zone geometry.
         private bool SoftCursorActive =>
             !_layerHidden &&
-            string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase);
+            !string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase);
 
         private bool TryGetCursorClientPosition(out int x, out int y)
         {
@@ -668,17 +673,18 @@ namespace WebOverlay
             _mode = mode ?? "hidden";
             SetQuestToggleHotkeyActive(!string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase));
 
-            if (string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase))
             {
-                // При переходе tab -> window никаких новых Raw Input может не прийти.
-                // Поэтому сразу показываем сохранённую виртуальную позицию.
+                // Любой интерактивный режим (quest-tab / quest-window / inventory)
+                // должен немедленно продолжать движение и публиковать курсор.
+                // Позицию между режимами сохраняем.
                 if (_cursorValid)
                     _cursorDirty = true;
             }
             else
             {
-                // Положение _cursorX/_cursorY сохраняем, но публикацию останавливаем
-                // до следующего перехода в полноценное окно.
+                // Скрытый слой не принимает/не публикует мышь, но координату
+                // сохраняем для следующего входа в паузу.
                 _cursorDirty = false;
                 _buttons = 0;
             }
