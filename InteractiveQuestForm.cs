@@ -600,8 +600,17 @@ namespace WebOverlay
 
             _mode = mode ?? "hidden";
 
-            if (!string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase))
             {
+                // При переходе tab -> window никаких новых Raw Input может не прийти.
+                // Поэтому сразу показываем сохранённую виртуальную позицию.
+                if (_cursorValid)
+                    _cursorDirty = true;
+            }
+            else
+            {
+                // Положение _cursorX/_cursorY сохраняем, но публикацию останавливаем
+                // до следующего перехода в полноценное окно.
                 _cursorDirty = false;
                 _buttons = 0;
             }
