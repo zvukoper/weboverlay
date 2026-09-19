@@ -6,13 +6,13 @@ using System.Windows.Forms;
 namespace WebOverlay
 {
     /// <summary>
-    /// ВРЕМЕННЫЙ RAW INPUT SINK ДЛЯ ДИАГНОСТИКИ КВЕСТОВ.
+    /// RAW INPUT SINK И МОСТ СОФТОВОГО КУРСОРА КВЕСТОВ.
     ///
-    /// Этот HWND больше НЕ является native hit-test/input surface.
-    /// Он никогда не показывается, не перекрывает визуальный Quest WebView2
-    /// и не получает WM_MOUSE*. Его единственная задача на этом этапе —
-    /// зарегистрировать обычный Windows Raw Input для мыши и показать, что
-    /// приложение действительно получает RAWMOUSE.lLastX/lLastY.
+    /// Этот HWND не является native hit-test/input surface.
+    /// Он никогда не показывается и не перекрывает визуальный Quest WebView2.
+    /// Его задача — получать Raw Input независимо от обычного hit-test,
+    /// определять фактическую экранную позицию курсора и передавать движение,
+    /// кнопки и колесо в исходную Quest-страницу через quest-native-input.
     ///
     /// Никаких SetCursorPos/ShowCursor/SetCursor, ClipCursor, mouse hook или
     /// блокировки обычных mouse-сообщений здесь нет.
