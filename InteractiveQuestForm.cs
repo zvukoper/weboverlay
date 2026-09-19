@@ -73,22 +73,24 @@ namespace WebOverlay
             [FieldOffset(20)] public uint ulExtraInformation;
         }
 
-        [StructLayout(LayoutKind.Explicit, Size = 32)]
+        // Win32 INPUT: x64 size must be exactly 40 bytes.
+        // Sequential layout reproduces the native alignment reliably.
+        [StructLayout(LayoutKind.Sequential)]
         private struct MOUSEINPUT
         {
-            [FieldOffset(0)] public int dx;
-            [FieldOffset(4)] public int dy;
-            [FieldOffset(8)] public uint mouseData;
-            [FieldOffset(12)] public uint dwFlags;
-            [FieldOffset(16)] public uint time;
-            [FieldOffset(24)] public IntPtr dwExtraInfo;
+            public int dx;
+            public int dy;
+            public uint mouseData;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
         }
 
-        [StructLayout(LayoutKind.Explicit, Size = 40)]
+        [StructLayout(LayoutKind.Sequential)]
         private struct INPUT
         {
-            [FieldOffset(0)] public uint type;
-            [FieldOffset(8)] public MOUSEINPUT mi;
+            public uint type;
+            public MOUSEINPUT mi;
         }
 
         private const uint INPUT_MOUSE = 0;
@@ -796,9 +798,6 @@ namespace WebOverlay
                 }
 
                 Point targetScreen = _visual.PointToScreen(Point.Empty);
-                clientX = 0;
-                clientY = 0;
-
                 if (!GetCursorPos(out Point currentScreen))
                 {
                     QuestInputDiagnostics.Log(
@@ -808,10 +807,10 @@ namespace WebOverlay
 
                 int dx = targetScreen.X - currentScreen.X;
                 int dy = targetScreen.Y - currentScreen.Y;
-                int eventCount = Math.Max(Math.Abs(dx), Math.Abs(dy));
-                int sentCount = 0;
-                int inputSize = Marshal.SizeOf<INPUT>();
 
+                _cursorCalibrationActive = true;
+
+                int inputSize = Marshal.SizeOf<INPUT>();
                 if (inputSize != 40)
                 {
                     QuestInputDiagnostics.Log(
@@ -819,79 +818,59 @@ namespace WebOverlay
                     return false;
                 }
 
-                _cursorCalibrationActive = true;
-
-                if (eventCount > 0)
+                uint sent = 0;
+                if (dx != 0 || dy != 0)
                 {
-                    var inputs = new INPUT[eventCount];
-                    int prevX = 0;
-                    int prevY = 0;
-
-                    for (int i = 1; i <= eventCount; i++)
+                    var input = new[]
                     {
-                        int stepX = (int)Math.Round(dx * (double)i / eventCount, MidpointRounding.AwayFromZero);
-                        int stepY = (int)Math.Round(dy * (double)i / eventCount, MidpointRounding.AwayFromZero);
-
-                        inputs[i - 1] = new INPUT
+                        new INPUT
                         {
                             type = INPUT_MOUSE,
                             mi = new MOUSEINPUT
                             {
-                                dx = stepX - prevX,
-                                dy = stepY - prevY,
+                                dx = dx,
+                                dy = dy,
                                 mouseData = 0,
                                 dwFlags = MOUSEEVENTF_MOVE,
                                 time = 0,
                                 dwExtraInfo = IntPtr.Zero
                             }
-                        };
+                        }
+                    };
 
-                        prevX = stepX;
-                        prevY = stepY;
-                    }
-
-                    sentCount = checked((int)SendInput(
-                        (uint)inputs.Length,
-                        inputs,
-                        inputSize));
-
-                    if (sentCount != eventCount)
-                    {
-                        int error = Marshal.GetLastWin32Error();
-                        QuestInputDiagnostics.Log(
-                            $"[SOFT-CURSOR][ZERO-SYNC] SendInput partial sent={sentCount}/{eventCount} error={error}");
-                    }
+                    sent = SendInput(1, input, inputSize);
                 }
 
+                int sendError = sent == 1 || (dx == 0 && dy == 0)
+                    ? 0
+                    : Marshal.GetLastWin32Error();
+
+                // SendInput lets ETS2 consume the relative movement. SetCursorPos is
+                // only the final exact Win32 anchor so physical and software cursors agree.
                 bool finalSet = SetCursorPos(targetScreen.X, targetScreen.Y);
                 int finalError = finalSet ? 0 : Marshal.GetLastWin32Error();
 
-                if (finalSet)
+                if (!finalSet)
                 {
-                    Point verify = Point.Empty;
-                    bool verified = GetCursorPos(out verify);
-
-                    _cursorX = 0;
-                    _cursorY = 0;
-                    _cursorValid = true;
-
-                    // SendInput/SetCursorPos могут оставить в очереди несколько
-                    // запаздывающих движений. Ничего от них не принимаем в виртуальный
-                    // курсор, пока ETS2 не закончит обработку калибровки.
-                    _ignoreRawUntilUtc = DateTime.UtcNow.AddMilliseconds(100);
-
                     QuestInputDiagnostics.Log(
-                        $"[SOFT-CURSOR][ZERO-SYNC] current={currentScreen.X},{currentScreen.Y} " +
-                        $"target={targetScreen.X},{targetScreen.Y} delta={dx},{dy} " +
-                        $"sendInput={sentCount}/{eventCount} inputSize={inputSize} " +
-                        $"setCursorPos={finalSet} verify={(verified ? $"{verify.X},{verify.Y}" : "FAIL")}");
-
-                    return true;
+                        $"[SOFT-CURSOR][ZERO-SYNC] final SetCursorPos failed error={finalError} " +
+                        $"sendInput={sent}/1 sendError={sendError}");
+                    return false;
                 }
 
+                bool verified = GetCursorPos(out Point verify);
+                _cursorX = 0;
+                _cursorY = 0;
+                _cursorValid = true;
+                _ignoreRawUntilUtc = DateTime.UtcNow.AddMilliseconds(100);
+
                 QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][ZERO-SYNC] final SetCursorPos failed error={finalError}");
-                return false;
+                    $"[SOFT-CURSOR][ZERO-SYNC] current={currentScreen.X},{currentScreen.Y} " +
+                    $"target={targetScreen.X},{targetScreen.Y} delta={dx},{dy} " +
+                    $"sendInput={sent}/1 inputSize={inputSize} verify=" +
+                    $"{(verified ? $"{verify.X},{verify.Y}" : "FAIL")}");
+
+                return true;
             }
             catch (Exception ex)
             {
