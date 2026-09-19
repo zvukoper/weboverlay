@@ -127,7 +127,9 @@ namespace WebOverlay
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
             TopMost = false;
-            BackColor = Color.Transparent;
+            // Hidden sink: transparent BackColor is unsupported by WinForms Form and
+            // caused constructor failure before CreateHandle/RegisterRawMouse().
+            BackColor = Color.Black;
             KeyPreview = false;
             Text = "ETS2 Assist raw input sink";
 
@@ -172,6 +174,7 @@ namespace WebOverlay
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            QuestInputDiagnostics.Log($"[RAW-INPUT][HWND] handle-created hwnd=0x{Handle.ToInt64():X}");
             RegisterRawMouse();
         }
 
