@@ -14,9 +14,9 @@ namespace WebOverlay
     /// определять фактическую экранную позицию курсора и передавать движение,
     /// кнопки и колесо в исходную Quest-страницу через quest-native-input.
     ///
-    /// Системный/игровой курсор не перемещаем и не захватываем. На входе в паузу
-    /// только считываем его текущую экранную позицию через GetCursorPos и ставим
-    /// виртуальный cursor.png в ту же точку. Дальше движение идёт только через Raw Input.
+    /// Системный/игровой курсор на входе в паузу принудительно ведём в общий нулевой
+    /// якорь через SendInput + финальный SetCursorPos. Дальше движение идёт только
+    /// через Raw Input и виртуальный cursor.png стартует из client=(0,0).
     /// </summary>
     internal sealed class InteractiveQuestForm : Form
     {
@@ -73,6 +73,31 @@ namespace WebOverlay
             [FieldOffset(20)] public uint ulExtraInformation;
         }
 
+        [StructLayout(LayoutKind.Explicit, Size = 32)]
+        private struct MOUSEINPUT
+        {
+            [FieldOffset(0)] public int dx;
+            [FieldOffset(4)] public int dy;
+            [FieldOffset(8)] public uint mouseData;
+            [FieldOffset(12)] public uint dwFlags;
+            [FieldOffset(16)] public uint time;
+            [FieldOffset(24)] public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Explicit, Size = 40)]
+        private struct INPUT
+        {
+            [FieldOffset(0)] public uint type;
+            [FieldOffset(8)] public MOUSEINPUT mi;
+        }
+
+        private const uint INPUT_MOUSE = 0;
+        private const uint MOUSEEVENTF_MOVE = 0x0001;
+        private const int WM_HOTKEY = 0x0312;
+        private const int HOTKEY_QUEST_TOGGLE = 9022;
+        private const uint MOD_NOREPEAT = 0x4000;
+
+
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool RegisterRawInputDevices(
             RAWINPUTDEVICE[] pRawInputDevices,
@@ -96,6 +121,15 @@ namespace WebOverlay
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetCursorPos(int X, int Y);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
         private readonly OverlayForm _visual;
         private readonly Timer _logTimer;
         private readonly Timer _publishTimer;
@@ -118,8 +152,9 @@ namespace WebOverlay
         private IntPtr _lastDevice;
 
         // ETS2 не предоставляет нам свою внутреннюю координату отрисованной стрелки.
-        // Надёжная общая точка — центр игрового экрана: при входе в паузу принудительно
-        // ставим физический курсор и виртуальный cursor.png в один и тот же центр.
+        // Надёжная общая точка — нулевой угол visual HWND: при входе в паузу физический
+        // курсор сначала получает относительные движения к (0,0), затем точно фиксируется
+        // там же, а виртуальный cursor.png стартует в client=(0,0).
         // После этого оба курсора продолжают движение по одинаковым Raw Input dx/dy.
         private int _cursorX;
         private int _cursorY;
@@ -128,6 +163,7 @@ namespace WebOverlay
         private int _buttons;
         private bool _cursorCalibrationActive;
         private DateTime _ignoreRawUntilUtc = DateTime.MinValue;
+        private bool _questToggleHotkeyRegistered;
 
         internal long RawPackets => _rawPackets;
         internal long RawPacketsAllStates => _rawPacketsAllStates;
@@ -295,6 +331,23 @@ namespace WebOverlay
             if (m.Msg == WM_INPUT)
             {
                 HandleRawInput(m.LParam);
+                m.Result = IntPtr.Zero;
+                return;
+            }
+
+            if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_QUEST_TOGGLE)
+            {
+                if (!_layerHidden && _mode != "hidden")
+                {
+                    QuestInputDiagnostics.Log("[HOTKEY][TAB] WM_HOTKEY -> quest_toggle_collapse");
+                    _visual.PostQuestInput(new
+                    {
+                        source = "quest-native-input",
+                        type = "hotkey",
+                        command = "quest_toggle_collapse"
+                    });
+                }
+
                 m.Result = IntPtr.Zero;
                 return;
             }
@@ -611,6 +664,7 @@ namespace WebOverlay
             }
 
             _mode = mode ?? "hidden";
+            SetQuestToggleHotkeyActive(!string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase));
 
             if (string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase))
             {
@@ -652,6 +706,8 @@ namespace WebOverlay
                 ResetRawSession();
             }
 
+            SetQuestToggleHotkeyActive(!hidden && !string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase));
+
             QuestInputDiagnostics.Log(
                 $"[RAW-INPUT][LAYER] hidden={hidden} active={RawSessionActive} softCursor={SoftCursorActive}");
         }
@@ -681,31 +737,42 @@ namespace WebOverlay
             _buttons = 0;
             _cursorDirty = false;
 
-            if (TryCenterSynchronizeCursors(out int cursorX, out int cursorY))
+            if (TryCalibrateCursorToZero(out int cursorX, out int cursorY))
             {
                 _cursorX = cursorX;
                 _cursorY = cursorY;
                 _cursorValid = true;
                 _cursorDirty = true;
                 QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][CENTER-SYNC] client={_cursorX},{_cursorY}");
+                    $"[SOFT-CURSOR][ZERO-SYNC] client={_cursorX},{_cursorY}");
             }
             else if (_cursorValid)
             {
                 _cursorDirty = true;
                 QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][CENTER-SYNC] fallback preserve={_cursorX},{_cursorY}");
+                    $"[SOFT-CURSOR][ZERO-SYNC] fallback preserve={_cursorX},{_cursorY}");
             }
             else
             {
                 _cursorValid = false;
-                QuestInputDiagnostics.Log("[SOFT-CURSOR][CENTER-SYNC] failed; no cursor position");
+                QuestInputDiagnostics.Log("[SOFT-CURSOR][ZERO-SYNC] failed; no cursor position");
             }
 
             QuestInputDiagnostics.Log("[RAW-INPUT][SESSION] reset");
         }
 
-        private bool TryCenterSynchronizeCursors(out int clientX, out int clientY)
+        /// <summary>
+        /// Пауза начинается с жёсткого общего якоря: физический игровой курсор
+        /// и виртуальный cursor.png должны оказаться в (0,0).
+        ///
+        /// В отличие от SetCursorPos, сначала генерируем относительное движение
+        /// через SendInput маленькими (1 px) шагами от текущей позиции к левому
+        /// верхнему углу. Это важно для игр, которые обновляют свой внутренний
+        /// курсор из потока mouse-move/raw-like input, а не только из конечной
+        /// Win32-позиции. После серии движений SetCursorPos используется только
+        /// как финальная точная фиксация.
+        /// </summary>
+        private bool TryCalibrateCursorToZero(out int clientX, out int clientY)
         {
             clientX = 0;
             clientY = 0;
@@ -715,7 +782,7 @@ namespace WebOverlay
                 if (_visual == null || _visual.IsDisposed || !_visual.IsHandleCreated)
                 {
                     QuestInputDiagnostics.Log(
-                        "[SOFT-CURSOR][CENTER-SYNC] visual HWND is not ready");
+                        "[SOFT-CURSOR][ZERO-SYNC] visual HWND is not ready");
                     return false;
                 }
 
@@ -724,42 +791,164 @@ namespace WebOverlay
                 if (width <= 0 || height <= 0)
                 {
                     QuestInputDiagnostics.Log(
-                        $"[SOFT-CURSOR][CENTER-SYNC] invalid visual size={width}x{height}");
+                        $"[SOFT-CURSOR][ZERO-SYNC] invalid visual size={width}x{height}");
                     return false;
                 }
 
-                clientX = width / 2;
-                clientY = height / 2;
+                Point targetScreen = _visual.PointToScreen(Point.Empty);
+                clientX = 0;
+                clientY = 0;
 
-                Point screenCenter = _visual.PointToScreen(new Point(clientX, clientY));
+                if (!GetCursorPos(out Point currentScreen))
+                {
+                    QuestInputDiagnostics.Log(
+                        $"[SOFT-CURSOR][ZERO-SYNC] GetCursorPos failed error={Marshal.GetLastWin32Error()}");
+                    return false;
+                }
+
+                int dx = targetScreen.X - currentScreen.X;
+                int dy = targetScreen.Y - currentScreen.Y;
+                int eventCount = Math.Max(Math.Abs(dx), Math.Abs(dy));
+                int sentCount = 0;
+                int inputSize = Marshal.SizeOf<INPUT>();
+
+                if (inputSize != 40)
+                {
+                    QuestInputDiagnostics.Log(
+                        $"[SOFT-CURSOR][ZERO-SYNC] INPUT size unexpected={inputSize}; expected=40");
+                    return false;
+                }
 
                 _cursorCalibrationActive = true;
-                bool moved = SetCursorPos(screenCenter.X, screenCenter.Y);
-                int error = moved ? 0 : Marshal.GetLastWin32Error();
 
-                // Виртуальный курсор получает ту же самую client-координату.
-                _cursorX = clientX;
-                _cursorY = clientY;
-                _cursorValid = moved;
+                if (eventCount > 0)
+                {
+                    var inputs = new INPUT[eventCount];
+                    int prevX = 0;
+                    int prevY = 0;
 
-                // Даём Windows/ETS2 поглотить возможный отложенный input от SetCursorPos.
-                _ignoreRawUntilUtc = DateTime.UtcNow.AddMilliseconds(60);
+                    for (int i = 1; i <= eventCount; i++)
+                    {
+                        int stepX = (int)Math.Round(dx * (double)i / eventCount, MidpointRounding.AwayFromZero);
+                        int stepY = (int)Math.Round(dy * (double)i / eventCount, MidpointRounding.AwayFromZero);
+
+                        inputs[i - 1] = new INPUT
+                        {
+                            type = INPUT_MOUSE,
+                            mi = new MOUSEINPUT
+                            {
+                                dx = stepX - prevX,
+                                dy = stepY - prevY,
+                                mouseData = 0,
+                                dwFlags = MOUSEEVENTF_MOVE,
+                                time = 0,
+                                dwExtraInfo = IntPtr.Zero
+                            }
+                        };
+
+                        prevX = stepX;
+                        prevY = stepY;
+                    }
+
+                    sentCount = checked((int)SendInput(
+                        (uint)inputs.Length,
+                        inputs,
+                        inputSize));
+
+                    if (sentCount != eventCount)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        QuestInputDiagnostics.Log(
+                            $"[SOFT-CURSOR][ZERO-SYNC] SendInput partial sent={sentCount}/{eventCount} error={error}");
+                    }
+                }
+
+                bool finalSet = SetCursorPos(targetScreen.X, targetScreen.Y);
+                int finalError = finalSet ? 0 : Marshal.GetLastWin32Error();
+
+                if (finalSet)
+                {
+                    Point verify = Point.Empty;
+                    bool verified = GetCursorPos(out verify);
+
+                    _cursorX = 0;
+                    _cursorY = 0;
+                    _cursorValid = true;
+
+                    // SendInput/SetCursorPos могут оставить в очереди несколько
+                    // запаздывающих движений. Ничего от них не принимаем в виртуальный
+                    // курсор, пока ETS2 не закончит обработку калибровки.
+                    _ignoreRawUntilUtc = DateTime.UtcNow.AddMilliseconds(100);
+
+                    QuestInputDiagnostics.Log(
+                        $"[SOFT-CURSOR][ZERO-SYNC] current={currentScreen.X},{currentScreen.Y} " +
+                        $"target={targetScreen.X},{targetScreen.Y} delta={dx},{dy} " +
+                        $"sendInput={sentCount}/{eventCount} inputSize={inputSize} " +
+                        $"setCursorPos={finalSet} verify={(verified ? $"{verify.X},{verify.Y}" : "FAIL")}");
+
+                    return true;
+                }
 
                 QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][CENTER-SYNC] screen={screenCenter.X},{screenCenter.Y} " +
-                    $"client={clientX},{clientY} setCursorPos={moved} error={error}");
-
-                return moved;
+                    $"[SOFT-CURSOR][ZERO-SYNC] final SetCursorPos failed error={finalError}");
+                return false;
             }
             catch (Exception ex)
             {
                 QuestInputDiagnostics.Log(
-                    $"[SOFT-CURSOR][CENTER-SYNC] exception={ex.Message}");
+                    $"[SOFT-CURSOR][ZERO-SYNC] exception={ex.Message}");
                 return false;
             }
             finally
             {
                 _cursorCalibrationActive = false;
+            }
+        }
+
+        private void SetQuestToggleHotkeyActive(bool active)
+        {
+            bool shouldBeActive =
+                active &&
+                !_layerHidden &&
+                IsHandleCreated &&
+                _mode != "hidden";
+
+            if (!shouldBeActive)
+            {
+                if (_questToggleHotkeyRegistered)
+                {
+                    try { UnregisterHotKey(Handle, HOTKEY_QUEST_TOGGLE); }
+                    catch { }
+                    _questToggleHotkeyRegistered = false;
+                    QuestInputDiagnostics.Log("[HOTKEY][TAB] unregistered");
+                }
+                return;
+            }
+
+            if (_questToggleHotkeyRegistered)
+                return;
+
+            try
+            {
+                bool ok = RegisterHotKey(
+                    Handle,
+                    HOTKEY_QUEST_TOGGLE,
+                    MOD_NOREPEAT,
+                    (uint)Keys.Tab);
+
+                _questToggleHotkeyRegistered = ok;
+
+                if (ok)
+                    QuestInputDiagnostics.Log(
+                        "[HOTKEY][TAB] registered on InteractiveQuestForm");
+                else
+                    QuestInputDiagnostics.Log(
+                        $"[HOTKEY][TAB] register failed error={Marshal.GetLastWin32Error()}");
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log(
+                    $"[HOTKEY][TAB] register exception={ex.Message}");
             }
         }
 
@@ -770,6 +959,13 @@ namespace WebOverlay
                 try { _logTimer.Stop(); _logTimer.Dispose(); } catch { }
                 try { _publishTimer.Stop(); _publishTimer.Dispose(); } catch { }
                 try { _cursorPublishTimer.Stop(); _cursorPublishTimer.Dispose(); } catch { }
+                try
+                {
+                    if (_questToggleHotkeyRegistered && IsHandleCreated)
+                        UnregisterHotKey(Handle, HOTKEY_QUEST_TOGGLE);
+                }
+                catch { }
+                _questToggleHotkeyRegistered = false;
                 try { Hide(); } catch { }
             }
 
