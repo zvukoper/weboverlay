@@ -52,6 +52,8 @@ namespace WebOverlay
         private const int WM_MBUTTONUP = 0x0208;
         private const int WM_MOUSEWHEEL = 0x020A;
         private const int WM_MOUSELEAVE = 0x02A3;
+        private const int WM_MOUSEACTIVATE = 0x0021;
+        private const int MA_NOACTIVATE = 0x0003;
 
         [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
@@ -163,10 +165,15 @@ namespace WebOverlay
         {
             switch (m.Msg)
             {
+                case WM_MOUSEACTIVATE:
+                    // Never let the transparent input surface become the foreground window.
+                    m.Result = new IntPtr(MA_NOACTIVATE);
+                    return;
+
                 case WM_MOUSEMOVE:
                     NativeMove++;
                     _lastNativePoint = PointFromLParam(m.LParam);
-                    Forward("mousemove", _lastNativePoint, 0, 0);
+                    Forward("mousemove", _lastNativePoint, 0, MouseButtonsFromWParam(m.WParam));
                     break;
                 case WM_LBUTTONDOWN:
                 case WM_LBUTTONDBLCLK:
@@ -196,7 +203,10 @@ namespace WebOverlay
                 case WM_MOUSEWHEEL:
                     NativeWheel++;
                     int delta = unchecked((short)((long)m.WParam >> 16));
-                    Forward("wheel", PointFromLParam(m.LParam), 0, 0, delta);
+                    // WM_MOUSEWHEEL.lParam is in SCREEN coordinates, unlike WM_MOUSEMOVE.
+                    var wheelScreen = PointFromLParam(m.LParam);
+                    var wheelLocal = PointToClient(wheelScreen);
+                    Forward("wheel", wheelLocal, 0, MouseButtonsFromWParam(m.WParam), delta);
                     break;
                 case WM_MOUSELEAVE:
                     _lastNativePoint = new Point(-1, -1);
@@ -210,6 +220,16 @@ namespace WebOverlay
         {
             long v = lParam.ToInt64();
             return new Point(unchecked((short)(v & 0xFFFF)), unchecked((short)((v >> 16) & 0xFFFF)));
+        }
+
+        private static int MouseButtonsFromWParam(IntPtr wParam)
+        {
+            int flags = wParam.ToInt32();
+            int buttons = 0;
+            if ((flags & 0x0001) != 0) buttons |= 1; // MK_LBUTTON
+            if ((flags & 0x0002) != 0) buttons |= 2; // MK_RBUTTON
+            if ((flags & 0x0010) != 0) buttons |= 4; // MK_MBUTTON
+            return buttons;
         }
 
         /// <summary>
