@@ -127,6 +127,8 @@ namespace WebOverlay
         internal long RawTotalDy => _totalDy;
         internal int RawLastDx => _lastDx;
         internal int RawLastDy => _lastDy;
+        internal int SoftCursorX => _cursorValid ? _cursorX : -1;
+        internal int SoftCursorY => _cursorValid ? _cursorY : -1;
 
         internal string Url { get; }
         internal string Mode => _mode;
@@ -337,14 +339,25 @@ namespace WebOverlay
                     if (!RawSessionActive)
                         return;
 
-                    if (TryGetCursorClientPosition(out int cursorX, out int cursorY))
+                    if (!_cursorValid)
                     {
-                        if (!_cursorValid || cursorX != _cursorX || cursorY != _cursorY)
-                            _cursorDirty = true;
+                        if (!TryGetCursorClientPosition(out int cursorX, out int cursorY))
+                        {
+                            cursorX = GetVisualCenterX();
+                            cursorY = GetVisualCenterY();
+                        }
+
                         _cursorX = cursorX;
                         _cursorY = cursorY;
                         _cursorValid = true;
                     }
+
+                    int previousX = _cursorX;
+                    int previousY = _cursorY;
+                    _cursorX = ClampCursorX(_cursorX + dx);
+                    _cursorY = ClampCursorY(_cursorY + dy);
+                    if (_cursorX != previousX || _cursorY != previousY)
+                        _cursorDirty = true;
 
                     _rawPackets++;
                     _lastDx = dx;
@@ -397,21 +410,50 @@ namespace WebOverlay
                 if (_visual != null && !_visual.IsDisposed && _visual.IsHandleCreated)
                     p = _visual.PointToClient(screen);
 
-                int width = _visual != null && !_visual.IsDisposed ? _visual.ClientSize.Width : 0;
-                int height = _visual != null && !_visual.IsDisposed ? _visual.ClientSize.Height : 0;
-                if (width > 0) p.X = Math.Clamp(p.X, 0, width - 1);
-                if (height > 0) p.Y = Math.Clamp(p.Y, 0, height - 1);
-
-                x = p.X;
-                y = p.Y;
+                x = ClampCursorX(p.X);
+                y = ClampCursorY(p.Y);
                 return true;
             }
             catch
             {
-                x = screen.X;
-                y = screen.Y;
+                x = ClampCursorX(screen.X);
+                y = ClampCursorY(screen.Y);
                 return true;
             }
+        }
+
+        private int GetVisualWidth()
+        {
+            return _visual != null && !_visual.IsDisposed ? _visual.ClientSize.Width : 0;
+        }
+
+        private int GetVisualHeight()
+        {
+            return _visual != null && !_visual.IsDisposed ? _visual.ClientSize.Height : 0;
+        }
+
+        private int GetVisualCenterX()
+        {
+            int width = GetVisualWidth();
+            return width > 0 ? width / 2 : 0;
+        }
+
+        private int GetVisualCenterY()
+        {
+            int height = GetVisualHeight();
+            return height > 0 ? height / 2 : 0;
+        }
+
+        private int ClampCursorX(int x)
+        {
+            int width = GetVisualWidth();
+            return width > 0 ? Math.Clamp(x, 0, width - 1) : Math.Max(0, x);
+        }
+
+        private int ClampCursorY(int y)
+        {
+            int height = GetVisualHeight();
+            return height > 0 ? Math.Clamp(y, 0, height - 1) : Math.Max(0, y);
         }
 
         private void PublishRawButtons(ushort flags, ushort data)
@@ -530,8 +572,8 @@ namespace WebOverlay
                     $"[RAW-INPUT][SUMMARY] registered={_rawRegistered} active={RawSessionActive} " +
                     $"mode={_mode} layerHidden={_layerHidden} packets={_rawPackets} " +
                     $"allStates={_rawPacketsAllStates} lastDx={_lastDx} lastDy={_lastDy} " +
-                    $"total={_totalDx},{_totalDy} flags=0x{_lastFlags:X4} " +
-                    $"buttonFlags=0x{_lastButtonFlags:X4}");
+                    $"total={_totalDx},{_totalDy} cursor={SoftCursorX},{SoftCursorY} " +
+                    $"flags=0x{_lastFlags:X4} buttonFlags=0x{_lastButtonFlags:X4}");
             }
             catch { }
         }
