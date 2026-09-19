@@ -6,10 +6,10 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <!-- Diagnostic build stamp: must be visible in Program.LogStartOnce(). -->
-    <Version>1.0.40.79</Version>
-    <AssemblyVersion>1.0.40.78</AssemblyVersion>
-    <FileVersion>1.0.40.78</FileVersion>
-    <AssemblyInformationalVersion>1.0.40.79-SOFT-CURSOR-R9</AssemblyInformationalVersion>
+    <Version>1.0.40.80</Version>
+    <AssemblyVersion>1.0.40.79</AssemblyVersion>
+    <FileVersion>1.0.40.79</FileVersion>
+    <AssemblyInformationalVersion>1.0.40.80-QUEST-SELECT-R10</AssemblyInformationalVersion>
 
     <!-- Настройки для самодостаточной публикации -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
