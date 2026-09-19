@@ -112,9 +112,10 @@ namespace WebOverlay
         internal string Mode => _mode;
         internal bool IsLayerHidden => _layerHidden;
 
-        private bool RawSessionActive =>
-            !_layerHidden &&
-            !string.Equals(_mode, "hidden", StringComparison.OrdinalIgnoreCase);
+        // Для этапа RAW INPUT TEST не зависим от geometry/state, чтобы
+        // исключить гонку: set_interactive_bounds мог прийти ДО создания sink-HWND.
+        // Пока sink существует и слой не скрыт, читаем Raw Input постоянно.
+        private bool RawSessionActive => !_layerHidden;
 
         internal InteractiveQuestForm(string url, AppConfig config, OverlayForm visual)
         {
