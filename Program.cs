@@ -886,6 +886,7 @@ namespace WebOverlay
         private double _diagJsDotX, _diagJsDotY;
         private bool _diagPaused, _diagCollapsed;
         private int _diagWebViewLogged;
+        private DateTime _diagLastJsPullLogUtc = DateTime.MinValue;
 
         // ================================================================
         // КУРСОР ИНТЕРАКТИВНОГО ОВЕРЛЕЯ (v1.0.40.60)
@@ -1464,8 +1465,21 @@ namespace WebOverlay
                 string counters = await core.ExecuteScriptAsync(
                     "(window.__questDiag && window.__questDiag.snapshot && window.__questDiag.snapshot()) || null").ConfigureAwait(true);
                 ApplyJsCounters(counters);
+
+                DateTime now = DateTime.UtcNow;
+                if ((now - _diagLastJsPullLogUtc).TotalMilliseconds >= 1000)
+                {
+                    _diagLastJsPullLogUtc = now;
+                    QuestInputDiagnostics.Log(
+                        $"[OVERLAY-DIAG][JS-PULL] url={url} drainChars={raw?.Length ?? 0} countersChars={counters?.Length ?? 0} " +
+                        $"diagObject={(counters != null && counters != "null")}", true);
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log(
+                    $"[OVERLAY-DIAG][JS-PULL-ERROR] url={url} errorType={ex.GetType().Name} error={ex.Message}", true);
+            }
             finally
             {
                 _diagJsBusy = false;
@@ -1652,6 +1666,9 @@ namespace WebOverlay
                 webView.CoreWebView2.Settings.IsWebMessageEnabled = true;
                 webView.CoreWebView2.NavigationCompleted += (s, e) =>
                 {
+                    QuestInputDiagnostics.Log(
+                        $"[OVERLAY-DIAG][NAV] url={url} success={e.IsSuccess} http={e.HttpStatusCode} " +
+                        $"webViewReady={(webView.CoreWebView2 != null)}", true);
                     try
                     {
                         LoadState();
