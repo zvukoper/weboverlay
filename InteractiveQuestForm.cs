@@ -33,6 +33,14 @@ namespace WebOverlay
         private const ushort HID_USAGE_PAGE_GENERIC = 0x01;
         private const ushort HID_USAGE_GENERIC_MOUSE = 0x02;
 
+        private const ushort RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001;
+        private const ushort RI_MOUSE_LEFT_BUTTON_UP = 0x0002;
+        private const ushort RI_MOUSE_RIGHT_BUTTON_DOWN = 0x0004;
+        private const ushort RI_MOUSE_RIGHT_BUTTON_UP = 0x0008;
+        private const ushort RI_MOUSE_MIDDLE_BUTTON_DOWN = 0x0010;
+        private const ushort RI_MOUSE_MIDDLE_BUTTON_UP = 0x0020;
+        private const ushort RI_MOUSE_WHEEL = 0x0400;
+
         [StructLayout(LayoutKind.Sequential)]
         private struct RAWINPUTDEVICE
         {
@@ -81,9 +89,13 @@ namespace WebOverlay
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetCursorPos(out Point lpPoint);
+
         private readonly OverlayForm _visual;
         private readonly Timer _logTimer;
         private readonly Timer _publishTimer;
+        private readonly Timer _cursorPublishTimer;
 
         private bool _layerHidden;
         private string _mode = "hidden";
@@ -100,6 +112,14 @@ namespace WebOverlay
         private ushort _lastButtonFlags;
         private ushort _lastButtonData;
         private IntPtr _lastDevice;
+
+        // Софт-курсор: положение берём из фактической позиции системного курсора,
+        // а движение/кнопки возбуждаются Raw Input. Сам системный курсор не управляем.
+        private int _cursorX;
+        private int _cursorY;
+        private bool _cursorValid;
+        private bool _cursorDirty;
+        private int _buttons;
 
         internal long RawPackets => _rawPackets;
         internal long RawPacketsAllStates => _rawPacketsAllStates;
@@ -144,6 +164,11 @@ namespace WebOverlay
             _publishTimer = new Timer { Interval = 100 };
             _publishTimer.Tick += (_, _) => PublishDiagnostics();
             _publishTimer.Start();
+
+            // Софтовый курсор должен обновляться заметно быстрее диагностической плашки.
+            _cursorPublishTimer = new Timer { Interval = 16 };
+            _cursorPublishTimer.Tick += (_, _) => PublishSoftCursor();
+            _cursorPublishTimer.Start();
 
             try
             {
@@ -312,6 +337,15 @@ namespace WebOverlay
                     if (!RawSessionActive)
                         return;
 
+                    if (TryGetCursorClientPosition(out int cursorX, out int cursorY))
+                    {
+                        if (!_cursorValid || cursorX != _cursorX || cursorY != _cursorY)
+                            _cursorDirty = true;
+                        _cursorX = cursorX;
+                        _cursorY = cursorY;
+                        _cursorValid = true;
+                    }
+
                     _rawPackets++;
                     _lastDx = dx;
                     _lastDy = dy;
@@ -323,6 +357,9 @@ namespace WebOverlay
 
                     _totalDx += dx;
                     _totalDy += dy;
+
+                    if (SoftCursorActive)
+                        PublishRawButtons(mouse.usButtonFlags, mouse.usButtonData);
 
                     if (_rawPackets <= 8 || (_rawPackets % 60) == 0)
                     {
@@ -342,6 +379,114 @@ namespace WebOverlay
             {
                 QuestInputDiagnostics.Log($"[RAW-INPUT][HANDLE] error={ex.Message}");
             }
+        }
+
+        private bool SoftCursorActive =>
+            !_layerHidden &&
+            string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase);
+
+        private bool TryGetCursorClientPosition(out int x, out int y)
+        {
+            x = y = 0;
+            if (!GetCursorPos(out Point screen))
+                return false;
+
+            try
+            {
+                Point p = screen;
+                if (_visual != null && !_visual.IsDisposed && _visual.IsHandleCreated)
+                    p = _visual.PointToClient(screen);
+
+                int width = _visual != null && !_visual.IsDisposed ? _visual.ClientSize.Width : 0;
+                int height = _visual != null && !_visual.IsDisposed ? _visual.ClientSize.Height : 0;
+                if (width > 0) p.X = Math.Clamp(p.X, 0, width - 1);
+                if (height > 0) p.Y = Math.Clamp(p.Y, 0, height - 1);
+
+                x = p.X;
+                y = p.Y;
+                return true;
+            }
+            catch
+            {
+                x = screen.X;
+                y = screen.Y;
+                return true;
+            }
+        }
+
+        private void PublishRawButtons(ushort flags, ushort data)
+        {
+            if (!SoftCursorActive || !_cursorValid)
+                return;
+
+            int x = _cursorX;
+            int y = _cursorY;
+
+            if ((flags & RI_MOUSE_LEFT_BUTTON_DOWN) != 0)
+            {
+                _buttons |= 1;
+                PostNativeInput("mousedown", x, y, 0, _buttons);
+            }
+            if ((flags & RI_MOUSE_LEFT_BUTTON_UP) != 0)
+            {
+                PostNativeInput("mouseup", x, y, 0, _buttons & ~1);
+                _buttons &= ~1;
+            }
+            if ((flags & RI_MOUSE_RIGHT_BUTTON_DOWN) != 0)
+            {
+                _buttons |= 2;
+                PostNativeInput("mousedown", x, y, 2, _buttons);
+            }
+            if ((flags & RI_MOUSE_RIGHT_BUTTON_UP) != 0)
+            {
+                PostNativeInput("mouseup", x, y, 2, _buttons & ~2);
+                _buttons &= ~2;
+            }
+            if ((flags & RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0)
+            {
+                _buttons |= 4;
+                PostNativeInput("mousedown", x, y, 1, _buttons);
+            }
+            if ((flags & RI_MOUSE_MIDDLE_BUTTON_UP) != 0)
+            {
+                PostNativeInput("mouseup", x, y, 1, _buttons & ~4);
+                _buttons &= ~4;
+            }
+            if ((flags & RI_MOUSE_WHEEL) != 0)
+            {
+                short delta = unchecked((short)data);
+                PostNativeInput("wheel", x, y, 0, _buttons, delta);
+            }
+        }
+
+        private void PostNativeInput(string type, int x, int y, int button, int buttons, int wheelDelta = 0)
+        {
+            try
+            {
+                _visual.PostQuestInput(new
+                {
+                    source = "quest-native-input",
+                    type,
+                    x,
+                    y,
+                    button,
+                    buttons,
+                    wheelDelta
+                });
+            }
+            catch (Exception ex)
+            {
+                QuestInputDiagnostics.Log($"[SOFT-CURSOR][PUBLISH] type={type} error={ex.Message}");
+            }
+        }
+
+        private void PublishSoftCursor()
+        {
+            if (!SoftCursorActive || !_cursorValid || !_cursorDirty)
+                return;
+
+            _cursorDirty = false;
+            PostNativeInput("mousemove", _cursorX, _cursorY, 0, _buttons);
         }
 
         private void PublishDiagnostics()
@@ -365,6 +510,9 @@ namespace WebOverlay
                     buttonFlags = _lastButtonFlags,
                     buttonData = _lastButtonData,
                     device = $"0x{_lastDevice.ToInt64():X}",
+                    cursorX = _cursorValid ? _cursorX : -1,
+                    cursorY = _cursorValid ? _cursorY : -1,
+                    softCursorActive = SoftCursorActive,
                     lastRawUtc = _lastRawUtc == DateTime.MinValue ? "" : _lastRawUtc.ToString("HH:mm:ss.fff")
                 });
             }
@@ -404,6 +552,12 @@ namespace WebOverlay
 
             _mode = mode ?? "hidden";
 
+            if (!string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase))
+            {
+                _cursorDirty = false;
+                _buttons = 0;
+            }
+
             if (changed)
             {
                 QuestInputDiagnostics.Log(
@@ -416,12 +570,21 @@ namespace WebOverlay
 
         internal void SetLayerHidden(bool hidden)
         {
+            bool wasHidden = _layerHidden;
             _layerHidden = hidden;
             if (hidden)
+            {
+                _cursorDirty = false;
+                _buttons = 0;
                 Hide();
+            }
+            else if (wasHidden && string.Equals(_mode, "window", StringComparison.OrdinalIgnoreCase))
+            {
+                ResetRawSession();
+            }
 
             QuestInputDiagnostics.Log(
-                $"[RAW-INPUT][LAYER] hidden={hidden} active={RawSessionActive}");
+                $"[RAW-INPUT][LAYER] hidden={hidden} active={RawSessionActive} softCursor={SoftCursorActive}");
         }
 
         internal void RaiseAboveVisual()
@@ -446,6 +609,23 @@ namespace WebOverlay
             _lastButtonData = 0;
             _lastDevice = IntPtr.Zero;
             _lastRawUtc = DateTime.MinValue;
+            _buttons = 0;
+            _cursorDirty = false;
+
+            if (TryGetCursorClientPosition(out int cursorX, out int cursorY))
+            {
+                _cursorX = cursorX;
+                _cursorY = cursorY;
+                _cursorValid = true;
+                _cursorDirty = true;
+                QuestInputDiagnostics.Log(
+                    $"[SOFT-CURSOR][INIT] client={_cursorX},{_cursorY}");
+            }
+            else
+            {
+                _cursorValid = false;
+                QuestInputDiagnostics.Log("[SOFT-CURSOR][INIT] GetCursorPos failed");
+            }
 
             QuestInputDiagnostics.Log("[RAW-INPUT][SESSION] reset");
         }
@@ -456,6 +636,7 @@ namespace WebOverlay
             {
                 try { _logTimer.Stop(); _logTimer.Dispose(); } catch { }
                 try { _publishTimer.Stop(); _publishTimer.Dispose(); } catch { }
+                try { _cursorPublishTimer.Stop(); _cursorPublishTimer.Dispose(); } catch { }
                 try { Hide(); } catch { }
             }
 
